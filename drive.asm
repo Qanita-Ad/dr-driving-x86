@@ -7,10 +7,13 @@
 ;
 ;  Sections of this file, in order:
 ;    constants, graphics (video), text, road, cars, traffic,
-;    cockpit, HUD, highway level, main program, data.
+;    cockpit, HUD, keyboard (INT 9), timer (INT 8), player,
+;    gauges (time/distance/fuel), collisions, highway level,
+;    main program, data.
 ;
-;  Phase 1: draws the highway screen with all 8 elements and fixed
-;  values, then waits for any key and returns to DOS.
+;  Phase 2: highway driving. Arrow keys and Space drive the car,
+;  traffic moves, collisions, fuel, time, distance and score work.
+;  ESC returns to DOS.
 ; =====================================================================
 
         org 100h                ; .COM programs start at offset 100h
@@ -96,6 +99,23 @@ LANE_RIGHT      equ 2
 FUEL_MAX        equ 1000
 TIME_MAX        equ 4380            ; 60 seconds x 73 ticks per second
 LEVEL_DISTANCE  equ 1000            ; metres needed to finish highway
+
+; ---------------- Keyboard scan codes ---------------------------------
+; The keyboard sends these numbers to port 60h when a key is pressed.
+SC_ESC          equ 01h
+SC_ENTER        equ 1Ch
+SC_SPACE        equ 39h
+SC_UP           equ 48h
+SC_LEFT         equ 4Bh
+SC_RIGHT        equ 4Dh
+SC_DOWN         equ 50h
+
+; ---------------- Timer -----------------------------------------------
+; The timer chip normally ticks 18.2 times a second (divisor 65536).
+; We make it 4 times faster: 1193182 / 16384 = 72.8 ticks a second.
+PIT_DIVISOR     equ 16384
+TICKS_PER_SEC   equ 73
+MAX_UPDATES     equ 8               ; max game updates before a redraw
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -1275,6 +1295,18 @@ FUEL_LOW        equ 250             ; below this the fuel bar is red
 HUD_TEXT_X      equ 40              ; left x of the DIST / SCORE text
 
 ; ---------------------------------------------------------------------
+; draw_string_adv : draw string SI at (BX, DX) and move BX to the end
+;   of the text, so the next piece can be drawn right after it.
+; ---------------------------------------------------------------------
+draw_string_adv:
+        push ax
+        call draw_string
+        call string_width
+        add bx, ax
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_time_bar : element 1. A tall rounded black track on the left.
 ;   The red part shows the time left:
 ;       red height = TRACK_H * time_left / TIME_MAX
@@ -1330,6 +1362,71 @@ draw_time_bar:
         mov cx, 3
         call fill_circle
 .done:  pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_dist_score : element 2.  "DIST 420 / 1000 m"  and  "SCORE 4793"
+; ---------------------------------------------------------------------
+draw_dist_score:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [text_scale], 1
+        mov byte [color], C_WHITE
+        mov bx, HUD_TEXT_X
+        mov dx, 3
+        mov si, txt_dist
+        call draw_string_adv
+        mov ax, [distance]
+        mov cx, 1
+        call number_to_string   ; SI -> digits
+        call draw_string_adv
+        mov si, txt_dist_end
+        call draw_string_adv
+        ; score line in yellow
+        mov byte [color], C_YELLOW
+        mov bx, HUD_TEXT_X
+        mov dx, 13
+        mov si, txt_score
+        call draw_string_adv
+        mov ax, [score]
+        mov cx, 1
+        call number_to_string
+        call draw_string_adv
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_score_only : just the score line (the parking level has no
+;   distance, see Figure 2).
+; ---------------------------------------------------------------------
+draw_score_only:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [text_scale], 1
+        mov byte [color], C_YELLOW
+        mov bx, HUD_TEXT_X
+        mov dx, 8
+        mov si, txt_score
+        call draw_string_adv
+        mov ax, [score]
+        mov cx, 1
+        call number_to_string
+        call draw_string_adv
+        pop si
         pop dx
         pop cx
         pop bx
@@ -1461,12 +1558,212 @@ draw_fuel_bar:
         ret
 
 ; =====================================================================
+;  input  -  Our own keyboard interrupt handler (INT 9)
+; ---------------------------------------------------------------------
+;  Every time a key is pressed or released, the keyboard puts a
+;  "scan code" in port 60h and the CPU runs interrupt 9:
+;     pressed  : the scan code           (Up arrow = 48h)
+;     released : the scan code + 80h     (Up arrow released = C8h)
+;  Our handler only writes 1 (pressed) or 0 (released) into the
+;  table key_down[scan code]. The game then looks at this table to
+;  know which keys are HELD DOWN right now, even several at once
+;  (for example Up + Left). INT 16h cannot do that: it gives one key
+;  at a time and repeats a key that is held.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; kb_isr : the interrupt service routine for INT 9.
+;   An interrupt can happen in the middle of any instruction of the
+;   game, so it must save every register it changes.
+; ---------------------------------------------------------------------
+kb_isr:
+        push ax
+        push bx
+        push ds
+        mov ax, cs
+        mov ds, ax              ; our variables live in this segment
+        in al, 60h              ; AL = scan code from the keyboard
+        cmp al, 0E0h
+        je .ack                 ; E0h only says "extended key": ignore
+        mov bl, al
+        and bx, 007Fh           ; BX = scan code without the release bit
+        test al, 80h
+        jnz .released
+        mov byte [key_down + bx], 1     ; key went down
+        jmp .ack
+.released:
+        mov byte [key_down + bx], 0     ; key went up
+.ack:
+        mov al, 20h
+        out 20h, al             ; "End Of Interrupt" to the PIC
+        pop ds
+        pop bx
+        pop ax
+        iret
+
+; ---------------------------------------------------------------------
+; install_keyboard : put kb_isr in the interrupt vector table.
+;   The table starts at 0000:0000. Entry n is 4 bytes at n*4:
+;   first the offset, then the segment of the handler.
+;   We save the old entry so we can put it back when we exit.
+; ---------------------------------------------------------------------
+install_keyboard:
+        push ax
+        push es
+        xor ax, ax
+        mov es, ax              ; ES = 0 -> interrupt vector table
+        cli                     ; no interrupts while we change it
+        mov ax, [es:9*4]
+        mov [old_int9], ax      ; old offset
+        mov ax, [es:9*4+2]
+        mov [old_int9+2], ax    ; old segment
+        mov word [es:9*4], kb_isr
+        mov [es:9*4+2], cs
+        sti
+        pop es
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; remove_keyboard : give INT 9 back to the BIOS (before exiting).
+; ---------------------------------------------------------------------
+remove_keyboard:
+        push ax
+        push es
+        xor ax, ax
+        mov es, ax
+        cli
+        mov ax, [old_int9]
+        mov [es:9*4], ax
+        mov ax, [old_int9+2]
+        mov [es:9*4+2], ax
+        sti
+        pop es
+        pop ax
+        ret
+
+; =====================================================================
+;  timer  -  Our own timer interrupt handler (INT 8)
+; ---------------------------------------------------------------------
+;  The game must run at the same speed on every computer. So we do
+;  NOT move things "once per frame". Instead the timer interrupt adds
+;  1 to tick_count about 73 times a second, and the main loop runs
+;  one game update for every tick. A fast PC just draws more frames.
+;
+;  The BIOS also uses INT 8 for the DOS clock and expects 18.2 ticks
+;  a second. Because our timer is 4 times faster, we call the old
+;  BIOS handler only on every 4th tick.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; timer_isr : the interrupt service routine for INT 8.
+; ---------------------------------------------------------------------
+timer_isr:
+        push ax
+        push ds
+        mov ax, cs
+        mov ds, ax
+        inc word [tick_count]   ; one more game update is due
+        inc byte [bios_div]
+        cmp byte [bios_div], 4
+        jb .own_eoi
+        mov byte [bios_div], 0
+        pop ds
+        pop ax
+        jmp far [cs:old_int8]   ; every 4th tick: BIOS handler (it sends EOI)
+.own_eoi:
+        mov al, 20h
+        out 20h, al             ; End Of Interrupt
+        pop ds
+        pop ax
+        iret
+
+; ---------------------------------------------------------------------
+; install_timer : hook INT 8 and speed up the timer chip (PIT).
+;   Port 43h = PIT command, port 40h = channel 0 divisor (low, high).
+; ---------------------------------------------------------------------
+install_timer:
+        push ax
+        push es
+        xor ax, ax
+        mov es, ax
+        cli
+        mov ax, [es:8*4]
+        mov [old_int8], ax
+        mov ax, [es:8*4+2]
+        mov [old_int8+2], ax
+        mov word [es:8*4], timer_isr
+        mov [es:8*4+2], cs
+        mov al, 36h             ; channel 0, low+high byte, mode 3
+        out 43h, al
+        mov ax, PIT_DIVISOR
+        out 40h, al             ; low byte of the divisor
+        mov al, ah
+        out 40h, al             ; high byte of the divisor
+        sti
+        pop es
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; remove_timer : normal timer speed again and the old INT 8 back.
+; ---------------------------------------------------------------------
+remove_timer:
+        push ax
+        push es
+        xor ax, ax
+        mov es, ax
+        cli
+        mov al, 36h
+        out 43h, al
+        xor al, al              ; divisor 0 means 65536 = normal speed
+        out 40h, al
+        out 40h, al
+        mov ax, [old_int8]
+        mov [es:8*4], ax
+        mov ax, [old_int8+2]
+        mov [es:8*4+2], ax
+        sti
+        pop es
+        pop ax
+        ret
+
+; =====================================================================
+;  gauges  -  Time, distance, score and fuel (game rules)
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; count_down_time : one tick less on the clock (stops at 0).
+; ---------------------------------------------------------------------
+count_down_time:
+        cmp word [time_left], 0
+        je .done
+        dec word [time_left]
+.done:  ret
+
+; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
-;  Phase 1: only draws the screen with fixed values.
-;  Order matters (painter's method): background first, then the road,
-;  then the cars, then our own car (bonnet, dashboard), then the HUD.
+;  highway_start  : sets all values for a new game
+;  highway_update : one game step (called once per timer tick)
+;  draw_highway_frame : draws the picture. Order matters (painter's
+;  method): background, road, cars, our own car, then the HUD.
 ; =====================================================================
+
+; ---------------------------------------------------------------------
+; highway_start : reset everything for a fresh highway level.
+; ---------------------------------------------------------------------
+highway_start:
+        mov word [time_left], TIME_MAX
+        mov word [tick_count], 0
+        ret
+
+; ---------------------------------------------------------------------
+; highway_update : one game step. Called once for every timer tick.
+; ---------------------------------------------------------------------
+highway_update:
+        call count_down_time
+        ret
 
 ; ---------------------------------------------------------------------
 ; draw_highway_frame : build one complete picture in the back buffer.
@@ -1481,19 +1778,43 @@ draw_highway_frame:
         call draw_fuel_bar      ; element 7
         call draw_wheel         ; element 8
         call draw_time_bar      ; element 1
+        call draw_dist_score    ; element 2
         ret
 
 
+; =====================================================================
+;  main program
+; ---------------------------------------------------------------------
+;  The game loop:  update the game  ->  draw a frame  ->  show it,
+;  again and again until ESC is pressed.
+; =====================================================================
 start:
         call video_init         ; mode 13h, palette, font, buffer
+        call install_keyboard   ; our INT 9 handler
+        call install_timer      ; our INT 8 handler, 73 ticks/second
         mov es, [back_seg]      ; ES = back buffer for all drawing
+        call highway_start
 
+main_loop:
+        ; ---- 1. one game update for every timer tick that has passed
+        cmp word [tick_count], MAX_UPDATES
+        jbe .catch_up
+        mov word [tick_count], MAX_UPDATES  ; very slow PC: skip some
+.catch_up:
+        cmp word [tick_count], 0
+        je .draw
+        dec word [tick_count]
+        call highway_update
+        jmp .catch_up
+        ; ---- 2. draw the new picture and show it
+.draw:
         call draw_highway_frame ; draw the picture in the buffer
         call flip_screen        ; show it
+        cmp byte [key_down + SC_ESC], 1
+        jne main_loop           ; keep going until ESC is held
 
-        mov ah, 00h             ; wait for any key (BIOS keyboard)
-        int 16h
-
+        call remove_timer       ; normal timer again
+        call remove_keyboard    ; give the keyboard back to DOS
         call video_close        ; back to text mode
         mov ax, 4C00h           ; return to DOS
         int 21h
@@ -1506,10 +1827,12 @@ start:
 ; =====================================================================
 
 ; ---------------- Game values shown on the screen ---------------------
-; Phase 1: fixed numbers, exactly like Figure 1.
+; Starting values (highway_start sets them again for every game).
 speed_kmh       dw 78               ; shown as 078 km/h
 fuel            dw FUEL_MAX / 2     ; half-full fuel bar
 time_left       dw TIME_MAX * 6 / 10 ; time bar 60% full
+distance        dw 420              ; metres driven
+score           dw 4793
 
 ; ---------------- Camera / road ---------------------------------------
 cam_x16         dw 0                ; our sideways position (0 = middle)
@@ -1528,6 +1851,9 @@ traffic:
 
 ; ---------------- Text strings (0 = end of string) --------------------
 txt_time        db 'Time', 0
+txt_dist        db 'DIST ', 0
+txt_dist_end    db ' / 1000 m', 0
+txt_score       db 'SCORE ', 0
 txt_kmh         db 'km/h', 0
 txt_fuel        db 'FUEL', 0
 txt_e           db 'E', 0
@@ -1606,3 +1932,11 @@ car_bottom      dw 0
 
 font_data       times 128 * 8 db 0  ; copy of the BIOS 8x8 font
 
+; ---------------- Keyboard (INT 9) ------------------------------------
+key_down        times 128 db 0      ; 1 = key is held down right now
+old_int9        dw 0, 0             ; old handler: offset, segment
+
+; ---------------- Timer (INT 8) ---------------------------------------
+old_int8        dw 0, 0             ; old handler: offset, segment
+tick_count      dw 0                ; game updates still to do
+bios_div        db 0                ; counts 0..3, BIOS runs on 4th tick
