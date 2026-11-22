@@ -129,6 +129,11 @@ SCORE_PER_METRE equ 10              ; points for every new metre
 ; ---------------- Lanes ---------------------------------------------
 CAM_STEP        equ 2               ; lane change slide: 1/8 lane per tick
 
+; ---------------- Traffic ---------------------------------------------
+TRAFFIC_SPEED   equ 40              ; km/h, all traffic cars
+RING_BACK       equ -3000           ; a car this far behind us ...
+RING_LEN        equ 32488           ; ... is moved this far forward
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1130,14 +1135,17 @@ draw_car:
 ; =====================================================================
 ;  traffic.asm  -  The other cars on the highway
 ; ---------------------------------------------------------------------
-;  Phase 1: the cars stand still at fixed places.
-;
 ;  Every car is one 4-byte record in the table "traffic" (data.asm):
 ;      offset 0 : z      (word)  distance in front of us, world units
+;                                (negative = behind us)
 ;      offset 2 : lane   (byte)  0 = left, 1 = middle, 2 = right
 ;      offset 3 : colour (byte)  palette colour of the body
-;  The records are stored from the farthest car to the nearest car,
-;  so drawing them in table order puts near cars in front of far ones.
+;
+;  All traffic drives forward at TRAFFIC_SPEED (40 km/h). When we are
+;  faster, the cars come closer to us. The cars live on a "ring" of
+;  RING_LEN units: a car that falls more than 3000 units behind us is
+;  put RING_LEN units further forward, near the horizon. So the same
+;  pattern of cars (traffic_pattern) repeats again and again.
 ; =====================================================================
 
 CAR_REC_SIZE    equ 4
@@ -1146,25 +1154,114 @@ CAR_LANE        equ 2
 CAR_COLOUR      equ 3
 
 ; ---------------------------------------------------------------------
-; draw_traffic : draw every car of the table.
+; traffic_start : put the cars at their starting places.
+;   Copies traffic_pattern (never changes) into traffic (moves).
+; ---------------------------------------------------------------------
+traffic_start:
+        push ax
+        push cx
+        push si
+        push di
+        mov si, traffic_pattern
+        mov di, traffic
+        mov cx, TRAFFIC_COUNT * CAR_REC_SIZE / 2
+.copy:  mov ax, [si]
+        mov [di], ax
+        add si, 2
+        add di, 2
+        loop .copy
+        pop di
+        pop si
+        pop cx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; traffic_update : move every car for one tick.
+;   Each tick a car comes closer by  (our speed - traffic speed).
+;   Example: we drive 100 km/h, traffic 40 km/h -> 60 units closer.
+;   If we drive slower than 40, the result is negative and the cars
+;   drive away from us.
+; ---------------------------------------------------------------------
+traffic_update:
+        push ax
+        push bx
+        push cx
+        push si
+        call player_velocity    ; AX = our speed (+ forward, - reverse)
+        sub ax, TRAFFIC_SPEED   ; AX = how much closer each car comes
+        mov si, traffic
+        mov cx, TRAFFIC_COUNT
+.next:  mov bx, [si + CAR_Z]
+        sub bx, ax
+        cmp bx, RING_BACK
+        jge .not_behind
+        add bx, RING_LEN        ; far behind us: back to the horizon
+.not_behind:
+        cmp bx, RING_BACK + RING_LEN
+        jl .not_too_far
+        sub bx, RING_LEN        ; drove away too far: put it behind us
+.not_too_far:
+        mov [si + CAR_Z], bx
+        add si, CAR_REC_SIZE
+        loop .next
+        pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_traffic : draw all cars, the farthest one first.
+;   A near car must cover a far car, so far cars are drawn first.
+;   Because cars change places on the ring, we sort every frame:
+;   again and again pick the car with the biggest z that is not
+;   drawn yet ("selection"), draw it and mark it in drawn[].
+;   Cars behind us (negative z) are skipped by draw_car.
 ; ---------------------------------------------------------------------
 draw_traffic:
         push ax
         push bx
         push cx
+        push dx
         push si
-        mov si, traffic
+        push di
         mov cx, TRAFFIC_COUNT
-.next:  push cx
+        xor di, di
+.clear: mov byte [drawn + di], 0
+        inc di
+        loop .clear
+        mov dx, TRAFFIC_COUNT   ; DX = cars still to draw
+.pick:
+        mov word [best_z], -32768
+        mov si, traffic
+        xor di, di              ; DI = car number
+.scan:  cmp byte [drawn + di], 1
+        je .skip                ; already drawn
+        mov ax, [si + CAR_Z]
+        cmp ax, [best_z]
+        jl .skip                ; nearer than the best so far
+        mov [best_z], ax
+        mov [best_car], si
+        mov [best_index], di
+.skip:  add si, CAR_REC_SIZE
+        inc di
+        cmp di, TRAFFIC_COUNT
+        jb .scan
+        ; draw the farthest remaining car and mark it
+        mov di, [best_index]
+        mov byte [drawn + di], 1
+        mov si, [best_car]
         mov al, [si + CAR_LANE]
         call lane_to_x16        ; BX = world x of the lane
         mov cl, [si + CAR_COLOUR]
         mov ax, [si + CAR_Z]
         call draw_car
-        pop cx
-        add si, CAR_REC_SIZE
-        loop .next
+        dec dx
+        jnz .pick
+        pop di
         pop si
+        pop dx
         pop cx
         pop bx
         pop ax
@@ -1845,6 +1942,14 @@ player_lanes:
         pop ax
         ret
 
+; ---------------------------------------------------------------------
+; player_velocity : AX = our speed in km/h with a sign
+;   (positive = driving forward, negative = reversing).
+; ---------------------------------------------------------------------
+player_velocity:
+        mov ax, [speed_kmh]
+        ret
+
 ; =====================================================================
 ;  gauges  -  Time, distance, score and fuel (game rules)
 ; =====================================================================
@@ -1911,6 +2016,7 @@ highway_start:
         mov word [cam_x16], 0
         mov byte [left_latch], 1    ; ignore keys that are already held
         mov byte [right_latch], 1
+        call traffic_start
         ret
 
 ; ---------------------------------------------------------------------
@@ -1920,6 +2026,7 @@ highway_update:
         call player_controls    ; read the pedals
         call player_lanes       ; lane changes
         call move_car           ; distance, score, road movement
+        call traffic_update     ; other cars move
         call count_down_time
         ret
 
@@ -1996,16 +2103,27 @@ score           dw 4793
 cam_x16         dw 0                ; our sideways position (0 = middle)
 road_scroll     dw 0                ; moves the lane dashes
 
-; ---------------- Traffic table (see traffic.asm) ---------------------
-; z (world units), lane, colour.  Farthest car first.
-TRAFFIC_COUNT   equ 3
-traffic:
-        dw 12000
-        db LANE_MIDDLE, C_CAR_RED
-        dw 4200
-        db LANE_RIGHT,  C_CAR_TEAL
-        dw 2300
+; ---------------- Traffic (see traffic.asm) ---------------------------
+; The repeating pattern: z (world units), lane, colour.
+; The cars are 6500 units (about 25 m) apart and two cars in a row are
+; never in the same lane, so there is always a free lane to go to.
+TRAFFIC_COUNT   equ 5
+traffic_pattern:
+        dw 4000
         db LANE_LEFT,   C_CAR_BLUE
+        dw 10500
+        db LANE_RIGHT,  C_CAR_TEAL
+        dw 17000
+        db LANE_MIDDLE, C_CAR_RED
+        dw 23500
+        db LANE_LEFT,   C_CAR_WHITE
+        dw -2500
+        db LANE_RIGHT,  C_CAR_YELLOW
+traffic         times TRAFFIC_COUNT * 4 db 0   ; the moving copy
+drawn           times TRAFFIC_COUNT db 0       ; draw_traffic marks
+best_z          dw 0
+best_car        dw 0
+best_index      dw 0
 
 ; ---------------- Text strings (0 = end of string) --------------------
 txt_time        db 'Time', 0
