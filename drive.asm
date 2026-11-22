@@ -126,6 +126,9 @@ COAST           equ 1               ; no pedal: -0.06 km/h every tick
 ; ---------------- Score ---------------------------------------------
 SCORE_PER_METRE equ 10              ; points for every new metre
 
+; ---------------- Lanes ---------------------------------------------
+CAM_STEP        equ 2               ; lane change slide: 1/8 lane per tick
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1784,6 +1787,64 @@ player_controls:
         pop ax
         ret
 
+; ---------------------------------------------------------------------
+; player_lanes : Left / Right arrow = move one lane.
+;   One key press moves only ONE lane, even if the key is held for a
+;   long time. left_latch remembers that the key was already down in
+;   the last tick; we only react when it changes from up to down.
+;   The lane number changes at once (0..2, never outside the road),
+;   but the camera (cam_x16) slides there in a few ticks, so the road
+;   moves sideways smoothly on the screen.
+; ---------------------------------------------------------------------
+player_lanes:
+        push ax
+        push bx
+        ; ---- Left arrow
+        mov al, [key_down + SC_LEFT]
+        cmp al, 1
+        jne .left_done
+        cmp byte [left_latch], 1
+        je .left_done           ; same press as before: ignore
+        cmp byte [player_lane], LANE_LEFT
+        je .left_done           ; already in the leftmost lane
+        dec byte [player_lane]
+.left_done:
+        mov [left_latch], al
+        ; ---- Right arrow
+        mov al, [key_down + SC_RIGHT]
+        cmp al, 1
+        jne .right_done
+        cmp byte [right_latch], 1
+        je .right_done
+        cmp byte [player_lane], LANE_RIGHT
+        je .right_done          ; already in the rightmost lane
+        inc byte [player_lane]
+.right_done:
+        mov [right_latch], al
+        ; ---- slide the camera towards the lane we are in
+        mov al, [player_lane]
+        call lane_to_x16        ; BX = where the camera should be
+        mov ax, [cam_x16]
+        cmp ax, bx
+        je .cam_done
+        jl .cam_right
+        sub ax, CAM_STEP        ; camera is right of target: go left
+        cmp ax, bx
+        jge .cam_store
+        mov ax, bx              ; do not go past the target
+        jmp .cam_store
+.cam_right:
+        add ax, CAM_STEP        ; camera is left of target: go right
+        cmp ax, bx
+        jle .cam_store
+        mov ax, bx
+.cam_store:
+        mov [cam_x16], ax
+.cam_done:
+        pop bx
+        pop ax
+        ret
+
 ; =====================================================================
 ;  gauges  -  Time, distance, score and fuel (game rules)
 ; =====================================================================
@@ -1846,6 +1907,10 @@ highway_start:
         mov word [dist_acc], 0
         mov word [score], 0
         mov word [road_scroll], 0
+        mov byte [player_lane], LANE_MIDDLE
+        mov word [cam_x16], 0
+        mov byte [left_latch], 1    ; ignore keys that are already held
+        mov byte [right_latch], 1
         ret
 
 ; ---------------------------------------------------------------------
@@ -1853,6 +1918,7 @@ highway_start:
 ; ---------------------------------------------------------------------
 highway_update:
         call player_controls    ; read the pedals
+        call player_lanes       ; lane changes
         call move_car           ; distance, score, road movement
         call count_down_time
         ret
@@ -2035,6 +2101,9 @@ bios_div        db 0                ; counts 0..3, BIOS runs on 4th tick
 
 ; ---------------- Player ----------------------------------------------
 speed_x16       dw 0                ; speed in 1/16 km/h
+player_lane     db LANE_MIDDLE      ; 0 = left, 1 = middle, 2 = right
+left_latch      db 0                ; Left was held in the last tick
+right_latch     db 0                ; Right was held in the last tick
 
 ; ---------------- Distance --------------------------------------------
 dist_acc        dw 0                ; world units not yet a full metre
