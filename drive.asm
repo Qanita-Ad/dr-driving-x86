@@ -1275,18 +1275,6 @@ FUEL_LOW        equ 250             ; below this the fuel bar is red
 HUD_TEXT_X      equ 40              ; left x of the DIST / SCORE text
 
 ; ---------------------------------------------------------------------
-; draw_string_adv : draw string SI at (BX, DX) and move BX to the end
-;   of the text, so the next piece can be drawn right after it.
-; ---------------------------------------------------------------------
-draw_string_adv:
-        push ax
-        call draw_string
-        call string_width
-        add bx, ax
-        pop ax
-        ret
-
-; ---------------------------------------------------------------------
 ; draw_time_bar : element 1. A tall rounded black track on the left.
 ;   The red part shows the time left:
 ;       red height = TRACK_H * time_left / TIME_MAX
@@ -1342,71 +1330,6 @@ draw_time_bar:
         mov cx, 3
         call fill_circle
 .done:  pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        ret
-
-; ---------------------------------------------------------------------
-; draw_dist_score : element 2.  "DIST 420 / 1000 m"  and  "SCORE 4793"
-; ---------------------------------------------------------------------
-draw_dist_score:
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
-        mov byte [text_scale], 1
-        mov byte [color], C_WHITE
-        mov bx, HUD_TEXT_X
-        mov dx, 3
-        mov si, txt_dist
-        call draw_string_adv
-        mov ax, [distance]
-        mov cx, 1
-        call number_to_string   ; SI -> digits
-        call draw_string_adv
-        mov si, txt_dist_end
-        call draw_string_adv
-        ; score line in yellow
-        mov byte [color], C_YELLOW
-        mov bx, HUD_TEXT_X
-        mov dx, 13
-        mov si, txt_score
-        call draw_string_adv
-        mov ax, [score]
-        mov cx, 1
-        call number_to_string
-        call draw_string_adv
-        pop si
-        pop dx
-        pop cx
-        pop bx
-        pop ax
-        ret
-
-; ---------------------------------------------------------------------
-; draw_score_only : just the score line (the parking level has no
-;   distance, see Figure 2).
-; ---------------------------------------------------------------------
-draw_score_only:
-        push ax
-        push bx
-        push cx
-        push dx
-        push si
-        mov byte [text_scale], 1
-        mov byte [color], C_YELLOW
-        mov bx, HUD_TEXT_X
-        mov dx, 8
-        mov si, txt_score
-        call draw_string_adv
-        mov ax, [score]
-        mov cx, 1
-        call number_to_string
-        call draw_string_adv
-        pop si
         pop dx
         pop cx
         pop bx
@@ -1558,7 +1481,6 @@ draw_highway_frame:
         call draw_fuel_bar      ; element 7
         call draw_wheel         ; element 8
         call draw_time_bar      ; element 1
-        call draw_dist_score    ; element 2
         ret
 
 
@@ -1588,8 +1510,6 @@ start:
 speed_kmh       dw 78               ; shown as 078 km/h
 fuel            dw FUEL_MAX / 2     ; half-full fuel bar
 time_left       dw TIME_MAX * 6 / 10 ; time bar 60% full
-distance        dw 420              ; metres driven
-score           dw 4793
 
 ; ---------------- Camera / road ---------------------------------------
 cam_x16         dw 0                ; our sideways position (0 = middle)
@@ -1608,9 +1528,6 @@ traffic:
 
 ; ---------------- Text strings (0 = end of string) --------------------
 txt_time        db 'Time', 0
-txt_dist        db 'DIST ', 0
-txt_dist_end    db ' / 1000 m', 0
-txt_score       db 'SCORE ', 0
 txt_kmh         db 'km/h', 0
 txt_fuel        db 'FUEL', 0
 txt_e           db 'E', 0
