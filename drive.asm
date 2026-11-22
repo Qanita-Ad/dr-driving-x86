@@ -709,6 +709,211 @@ draw_road:
         ret
 
 ; =====================================================================
+;  cars.asm  -  Drawing a car (seen from behind) in perspective
+; ---------------------------------------------------------------------
+;  Used for the highway traffic and for the parked cars.
+;  A car is just a few rectangles:
+;      +-------------+   <- body (car colour)
+;      |  +-------+  |   <- rear window (dark blue)
+;      |  +-------+  |
+;      |[]         []|   <- tail lights (red)
+;      +=============+   <- bumper (dark)
+;  The size of every part is a fraction of the lane width on the row
+;  where the car stands, so far cars are small and near cars are big.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; draw_car
+;   In : AX = z (distance in front of us, world units)
+;        BX = world x in 1/16 lanes (-16, 0, +16 for the lane centres)
+;        CL = body colour
+;   Cars that are too close (under the bonnet) or too far are skipped.
+; ---------------------------------------------------------------------
+draw_car:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        ; (old NASM versions only allow conditional jumps of up to
+        ;  127 bytes, so for far targets we jump over a normal JMP)
+        cmp ax, CAR_Z_MIN
+        jae .not_too_near
+        jmp .done               ; too close: hidden under the bonnet
+.not_too_near:
+        cmp ax, CAR_Z_MAX
+        jbe .visible
+        jmp .done               ; too far away to draw
+.visible:
+        mov [car_colour], cl
+        call project_row        ; AX = t
+        mov [car_bottom], ax
+        add word [car_bottom], HORIZON   ; bottom row of the car
+        call lane_x             ; AX = centre x, CX = lane width
+        mov [car_xc], ax
+
+        ; width = 3/4 of a lane, at least 3 pixels
+        mov ax, cx
+        shl ax, 1
+        add ax, cx
+        shr ax, 2
+        cmp ax, 3
+        jge .w_ok
+        mov ax, 3
+.w_ok:  mov [car_w], ax
+        ; height = 5/8 of the width, at least 2 pixels
+        mov bx, 5
+        mul bx
+        shr ax, 3
+        cmp ax, 2
+        jge .h_ok
+        mov ax, 2
+.h_ok:  mov [car_h], ax
+        ; left = centre - width/2 ,  top = bottom - height + 1
+        mov ax, [car_w]
+        shr ax, 1
+        mov bx, [car_xc]
+        sub bx, ax
+        mov [car_left], bx
+        mov ax, [car_bottom]
+        sub ax, [car_h]
+        inc ax
+        mov [car_top], ax
+
+        ; ---- body
+        mov al, [car_colour]
+        mov [color], al
+        mov ax, [car_left]
+        mov bx, [car_top]
+        mov cx, [car_w]
+        mov dx, [car_h]
+        call fill_rect
+
+        ; ---- rear window: inset by width/8, from h/6 down to h/2
+        mov byte [color], C_WINDOW
+        mov si, [car_w]
+        shr si, 3               ; SI = width / 8
+        mov ax, [car_h]
+        xor dx, dx
+        mov bx, 6
+        div bx
+        mov di, ax              ; DI = height / 6
+        mov ax, [car_left]
+        add ax, si
+        mov bx, [car_top]
+        add bx, di
+        mov cx, [car_w]
+        sub cx, si
+        sub cx, si
+        mov dx, [car_h]
+        shr dx, 1
+        sub dx, di              ; window height = h/2 - h/6
+        jg .win_ok
+        mov dx, 1
+.win_ok:
+        call fill_rect
+
+        ; ---- tail lights: size w/6 x h/5, placed at 3/5 of the height
+        mov byte [color], C_TAIL
+        mov ax, [car_w]
+        xor dx, dx
+        mov bx, 6
+        div bx
+        cmp ax, 1
+        jge .lw_ok
+        mov ax, 1
+.lw_ok: mov si, ax              ; SI = light width
+        mov ax, [car_h]
+        xor dx, dx
+        mov bx, 5
+        div bx
+        cmp ax, 1
+        jge .lh_ok
+        mov ax, 1
+.lh_ok: mov di, ax              ; DI = light height
+        mov ax, [car_h]
+        mov bx, 3
+        mul bx
+        mov bx, 5
+        div bx                  ; AX = 3h/5
+        add ax, [car_top]
+        mov bx, ax              ; BX = light top row
+        mov ax, [car_left]
+        mov cx, si
+        mov dx, di
+        call fill_rect          ; left light
+        mov ax, [car_left]
+        add ax, [car_w]
+        sub ax, si
+        call fill_rect          ; right light
+
+        ; ---- dark bumper on the bottom row(s)
+        mov byte [color], C_WHEEL
+        mov dx, [car_h]
+        shr dx, 3               ; bumper height = h/8
+        cmp dx, 1
+        jge .b_ok
+        mov dx, 1
+.b_ok:  mov bx, [car_bottom]
+        sub bx, dx
+        inc bx
+        mov ax, [car_left]
+        mov cx, [car_w]
+        call fill_rect
+.done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
+;  traffic.asm  -  The other cars on the highway
+; ---------------------------------------------------------------------
+;  Phase 1: the cars stand still at fixed places.
+;
+;  Every car is one 4-byte record in the table "traffic" (data.asm):
+;      offset 0 : z      (word)  distance in front of us, world units
+;      offset 2 : lane   (byte)  0 = left, 1 = middle, 2 = right
+;      offset 3 : colour (byte)  palette colour of the body
+;  The records are stored from the farthest car to the nearest car,
+;  so drawing them in table order puts near cars in front of far ones.
+; =====================================================================
+
+CAR_REC_SIZE    equ 4
+CAR_Z           equ 0
+CAR_LANE        equ 2
+CAR_COLOUR      equ 3
+
+; ---------------------------------------------------------------------
+; draw_traffic : draw every car of the table.
+; ---------------------------------------------------------------------
+draw_traffic:
+        push ax
+        push bx
+        push cx
+        push si
+        mov si, traffic
+        mov cx, TRAFFIC_COUNT
+.next:  push cx
+        mov al, [si + CAR_LANE]
+        call lane_to_x16        ; BX = world x of the lane
+        mov cl, [si + CAR_COLOUR]
+        mov ax, [si + CAR_Z]
+        call draw_car
+        pop cx
+        add si, CAR_REC_SIZE
+        loop .next
+        pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
 ;  cockpit.asm  -  Orange bonnet, dashboard panel and steering wheel
 ; ---------------------------------------------------------------------
 ;  These are drawn AFTER the road and the cars, so they cover anything
@@ -846,6 +1051,7 @@ draw_wheel:
 draw_highway_frame:
         call draw_sky_ground    ; sky and grass
         call draw_road          ; element 3: road and lane lines
+        call draw_traffic       ; element 4: traffic cars
         call draw_bonnet        ; element 5: orange bonnet
         call draw_dashboard
         call draw_wheel         ; element 8
@@ -880,6 +1086,16 @@ start:
 cam_x16         dw 0                ; our sideways position (0 = middle)
 road_scroll     dw 0                ; moves the lane dashes
 
+; ---------------- Traffic table (see traffic.asm) ---------------------
+; z (world units), lane, colour.  Farthest car first.
+TRAFFIC_COUNT   equ 3
+traffic:
+        dw 12000
+        db LANE_MIDDLE, C_CAR_RED
+        dw 4200
+        db LANE_RIGHT,  C_CAR_TEAL
+        dw 2300
+        db LANE_LEFT,   C_CAR_BLUE
 
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
@@ -941,5 +1157,12 @@ rd_t            dw 0                ; draw_road
 rd_cx           dw 0
 rd_lw           dw 0
 
+car_colour      db 0                ; draw_car
+car_xc          dw 0
+car_w           dw 0
+car_h           dw 0
+car_left        dw 0
+car_top         dw 0
+car_bottom      dw 0
 
 
