@@ -145,6 +145,10 @@ HIT_BACK        equ -1700           ; ... but not further behind = crash
 CRASH_PENALTY   equ 50              ; points lost in a crash
 CRASH_SHOW      equ 2 * TICKS_PER_SEC   ; "CRASH" text stays 2 seconds
 
+; ---------------- Fuel ------------------------------------------------
+FUEL_IDLE       equ 20              ; fuel use while moving ...
+FUEL_DIV        equ 520             ; ... (IDLE + speed) / DIV per tick
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2060,6 +2064,32 @@ move_car:
         ret
 
 ; ---------------------------------------------------------------------
+; use_fuel : fuel goes down while the car moves.
+;   Every tick:   fuel_acc = fuel_acc + FUEL_IDLE + speed
+;   Every time fuel_acc reaches FUEL_DIV, one unit of fuel is used.
+;   So at high speed the fuel goes down faster. Standing still uses
+;   no fuel. (At 140 km/h a full tank lasts about 45 seconds.)
+;   The fuel bar turns red by itself when fuel < FUEL_LOW (hud).
+; ---------------------------------------------------------------------
+use_fuel:
+        push ax
+        mov ax, [speed_kmh]
+        or ax, ax
+        jz .done                ; not moving: no fuel used
+        add ax, FUEL_IDLE
+        add [fuel_acc], ax
+.unit_loop:
+        cmp word [fuel_acc], FUEL_DIV
+        jb .done
+        sub word [fuel_acc], FUEL_DIV
+        cmp word [fuel], 0
+        je .unit_loop           ; tank already empty
+        dec word [fuel]
+        jmp .unit_loop
+.done:  pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; count_down_time : one tick less on the clock (stops at 0).
 ; ---------------------------------------------------------------------
 count_down_time:
@@ -2181,6 +2211,8 @@ highway_start:
         call traffic_start
         mov byte [gear], GEAR_D
         mov word [crash_timer], 0
+        mov word [fuel], FUEL_MAX
+        mov word [fuel_acc], 0
         ret
 
 ; ---------------------------------------------------------------------
@@ -2192,6 +2224,7 @@ highway_update:
         call move_car           ; distance, score, road movement
         call traffic_update     ; other cars move
         call check_collisions   ; crash?
+        call use_fuel           ; fuel goes down
         call count_down_time
         ret
 
@@ -2398,3 +2431,6 @@ best_distance   dw 0                ; farthest metre reached (for score)
 
 ; ---------------- Collisions ------------------------------------------
 crash_timer     dw 0                ; ticks the CRASH text stays
+
+; ---------------- Fuel ------------------------------------------------
+fuel_acc        dw 0                ; collects use until FUEL_DIV
