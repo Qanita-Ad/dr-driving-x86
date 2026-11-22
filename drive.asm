@@ -1275,6 +1275,68 @@ FUEL_LOW        equ 250             ; below this the fuel bar is red
 HUD_TEXT_X      equ 40              ; left x of the DIST / SCORE text
 
 ; ---------------------------------------------------------------------
+; draw_time_bar : element 1. A tall rounded black track on the left.
+;   The red part shows the time left:
+;       red height = TRACK_H * time_left / TIME_MAX
+; ---------------------------------------------------------------------
+TBAR_X          equ 8               ; left x of the track
+TBAR_W          equ 7
+TBAR_TOP        equ 25              ; top of the straight part
+TBAR_BOTTOM     equ 136             ; bottom of the straight part
+TBAR_H          equ TBAR_BOTTOM - TBAR_TOP
+
+draw_time_bar:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [color], C_WHITE
+        mov byte [text_scale], 1
+        mov si, txt_time
+        mov bx, 2
+        mov dx, 12
+        call draw_string
+        ; ---- black track with round ends
+        mov byte [color], C_BAR_BG
+        mov ax, TBAR_X
+        mov bx, TBAR_TOP
+        mov cx, TBAR_W
+        mov dx, TBAR_H
+        call fill_rect
+        mov ax, TBAR_X + 3
+        mov bx, TBAR_TOP
+        mov cx, 3
+        call fill_circle
+        mov bx, TBAR_BOTTOM
+        call fill_circle
+        ; ---- red part, growing up from the bottom
+        mov ax, [time_left]
+        cmp ax, 0
+        jle .done
+        mov cx, TBAR_H
+        mul cx                  ; DX:AX = time_left * TBAR_H
+        mov cx, TIME_MAX
+        div cx                  ; AX = red height
+        mov dx, ax              ; DX = height
+        mov byte [color], C_RED
+        mov bx, TBAR_BOTTOM
+        sub bx, dx              ; BX = top of the red part
+        mov ax, TBAR_X
+        mov cx, TBAR_W
+        call fill_rect
+        mov ax, TBAR_X + 3      ; round red bottom end
+        mov bx, TBAR_BOTTOM
+        mov cx, 3
+        call fill_circle
+.done:  pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_speed_box : element 6. Box with the speed as 3 yellow digits.
 ; ---------------------------------------------------------------------
 SBOX_X          equ 97
@@ -1353,6 +1415,7 @@ draw_highway_frame:
         call draw_dashboard
         call draw_speed_box     ; element 6
         call draw_wheel         ; element 8
+        call draw_time_bar      ; element 1
         ret
 
 
@@ -1380,6 +1443,7 @@ start:
 ; ---------------- Game values shown on the screen ---------------------
 ; Phase 1: fixed numbers, exactly like Figure 1.
 speed_kmh       dw 78               ; shown as 078 km/h
+time_left       dw TIME_MAX * 6 / 10 ; time bar 60% full
 
 ; ---------------- Camera / road ---------------------------------------
 cam_x16         dw 0                ; our sideways position (0 = middle)
@@ -1397,6 +1461,7 @@ traffic:
         db LANE_LEFT,   C_CAR_BLUE
 
 ; ---------------- Text strings (0 = end of string) --------------------
+txt_time        db 'Time', 0
 txt_kmh         db 'km/h', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
