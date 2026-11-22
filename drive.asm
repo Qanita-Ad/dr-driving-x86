@@ -1396,6 +1396,70 @@ draw_speed_box:
         pop ax
         ret
 
+; ---------------------------------------------------------------------
+; draw_fuel_bar : element 7. "FUEL", a bar, and the letters E and F.
+;   Filled width = FBAR_W * fuel / FUEL_MAX.
+;   The bar is green, but red when fuel < FUEL_LOW.
+; ---------------------------------------------------------------------
+FBAR_X          equ 173
+FBAR_Y          equ 180
+FBAR_W          equ 60              ; inside width
+FBAR_H          equ 9               ; inside height
+
+draw_fuel_bar:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [text_scale], 1
+        mov byte [color], C_LIGHT_GREY
+        mov si, txt_fuel
+        mov bx, FBAR_X
+        mov dx, FBAR_Y - 10
+        call draw_string
+        mov si, txt_e
+        mov bx, FBAR_X
+        mov dx, FBAR_Y + FBAR_H + 3
+        call draw_string
+        mov si, txt_f
+        mov bx, FBAR_X + FBAR_W - 6
+        call draw_string
+        ; outline and empty inside
+        mov ax, FBAR_X - 1
+        mov bx, FBAR_Y - 1
+        mov cx, FBAR_W + 2
+        mov dx, FBAR_H + 2
+        call fill_rect          ; still light grey = the border
+        mov byte [color], C_BAR_BG
+        mov ax, FBAR_X
+        mov bx, FBAR_Y
+        mov cx, FBAR_W
+        mov dx, FBAR_H
+        call fill_rect
+        ; filled part
+        mov byte [color], C_GREEN
+        cmp word [fuel], FUEL_LOW
+        jae .colour_ok
+        mov byte [color], C_RED ; low fuel warning
+.colour_ok:
+        mov ax, [fuel]
+        mov cx, FBAR_W
+        mul cx
+        mov cx, FUEL_MAX
+        div cx                  ; AX = filled width
+        mov cx, ax
+        mov ax, FBAR_X
+        mov bx, FBAR_Y
+        mov dx, FBAR_H
+        call fill_rect
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
 ; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
@@ -1414,6 +1478,7 @@ draw_highway_frame:
         call draw_bonnet        ; element 5: orange bonnet
         call draw_dashboard
         call draw_speed_box     ; element 6
+        call draw_fuel_bar      ; element 7
         call draw_wheel         ; element 8
         call draw_time_bar      ; element 1
         ret
@@ -1443,6 +1508,7 @@ start:
 ; ---------------- Game values shown on the screen ---------------------
 ; Phase 1: fixed numbers, exactly like Figure 1.
 speed_kmh       dw 78               ; shown as 078 km/h
+fuel            dw FUEL_MAX / 2     ; half-full fuel bar
 time_left       dw TIME_MAX * 6 / 10 ; time bar 60% full
 
 ; ---------------- Camera / road ---------------------------------------
@@ -1463,6 +1529,9 @@ traffic:
 ; ---------------- Text strings (0 = end of string) --------------------
 txt_time        db 'Time', 0
 txt_kmh         db 'km/h', 0
+txt_fuel        db 'FUEL', 0
+txt_e           db 'E', 0
+txt_f           db 'F', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
