@@ -306,6 +306,67 @@ fill_rect:
         pop ax
         ret
 
+; =====================================================================
+;  road.asm  -  Sky, grass, the 3-lane road and the perspective maths
+; ---------------------------------------------------------------------
+;  Perspective in one sentence:
+;     an object that is z units in front of us is drawn on screen row
+;         y = HORIZON + t,   where  t = PROJ_K / z
+;  So far objects (big z) are close to the horizon and near objects
+;  (small z) are low on the screen.
+;
+;  On row t, one lane is (8 + t) pixels wide. That is why the road
+;  looks narrow at the top and wide at the bottom.
+;
+;  [cam_x16] is the sideways position of our car in 1/16 lanes
+;  (-16 = left lane, 0 = middle, +16 = right). When we move left, the
+;  whole road is drawn shifted to the right, and the other way round.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; project_row : world distance -> screen row offset
+;   In : AX = z (must be > 0)      Out: AX = t = PROJ_K / z
+; ---------------------------------------------------------------------
+project_row:
+        push bx
+        push dx
+        mov bx, ax
+        mov ax, PROJ_K
+        xor dx, dx              ; DX:AX = 60000
+        div bx                  ; AX = 60000 / z
+        pop dx
+        pop bx
+        ret
+
+; ---------------------------------------------------------------------
+; lane_x : where is a sideways world position on a given row?
+;   In : AX = t (row offset below horizon), BX = world x in 1/16 lanes
+;   Out: AX = screen x,  CX = lane width in pixels on that row (8 + t)
+;   Formula: x = 160 + (worldX - cameraX) * laneWidth / 16
+; ---------------------------------------------------------------------
+lane_x:
+        push dx
+        mov cx, ax
+        add cx, 8               ; CX = lane width on this row
+        mov ax, bx
+        sub ax, [cam_x16]       ; position relative to our car
+        imul cx                 ; AX = (worldX - camX) * laneWidth
+        sar ax, 4               ; divide by 16 (keeps the sign)
+        add ax, SCREEN_W / 2
+        pop dx
+        ret
+
+; ---------------------------------------------------------------------
+; lane_to_x16 : lane number -> world x.   In: AL = lane (0,1,2)
+;   Out: BX = (lane - 1) * 16   (i.e. -16, 0 or +16)
+; ---------------------------------------------------------------------
+lane_to_x16:
+        xor bh, bh
+        mov bl, al
+        dec bx
+        shl bx, 4
+        ret
+
 ; ---------------------------------------------------------------------
 ; draw_sky_ground : blue sky above the horizon, green grass below.
 ; ---------------------------------------------------------------------
@@ -332,6 +393,115 @@ draw_sky_ground:
         pop ax
         ret
 
+; ---------------------------------------------------------------------
+; draw_road : draw the highway one screen row at a time.
+;   For every row below the horizon we:
+;     1. find the road centre and the lane width on that row,
+;     2. paint the grey road (3 lanes wide),
+;     3. paint the two solid white edge lines,
+;     4. paint the two dashed lane lines, but only on rows whose world
+;        distance falls on the "painted" part of the dash pattern.
+;   [road_scroll] moves the dash pattern when the car drives, so the
+;   dashes slide towards us.
+; ---------------------------------------------------------------------
+draw_road:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov word [rd_t], 1
+.row:
+        ; ---- 1. centre and lane width
+        mov ax, [rd_t]
+        xor bx, bx              ; world x = 0 is the road centre
+        call lane_x             ; AX = centre x, CX = lane width
+        mov [rd_cx], ax
+        mov [rd_lw], cx
+        mov si, cx
+        shl si, 1
+        add si, cx
+        shr si, 1               ; SI = half road width = 1.5 lanes
+        mov dx, [rd_t]
+        add dx, HORIZON         ; DX = screen row
+
+        ; ---- 2. grey road surface
+        mov byte [color], C_ROAD
+        mov ax, [rd_cx]
+        sub ax, si
+        mov bx, [rd_cx]
+        add bx, si
+        call hline
+
+        ; line thickness grows a little towards the bottom
+        mov ax, [rd_t]
+        mov bl, 24
+        div bl                  ; AL = t / 24
+        xor ah, ah
+        inc ax
+        mov di, ax              ; DI = line width in pixels
+
+        ; ---- 3. solid white edges
+        mov byte [color], C_WHITE
+        mov ax, [rd_cx]
+        sub ax, si              ; left edge of the road
+        mov bx, ax
+        add bx, di
+        dec bx
+        call hline
+        mov bx, [rd_cx]
+        add bx, si              ; right edge of the road
+        mov ax, bx
+        sub ax, di
+        inc ax
+        call hline
+
+        ; ---- 4. dashed lane lines
+        cmp word [rd_t], 2
+        jb .next_row            ; too close to the horizon to see
+        mov ax, [rd_t]
+        call project_row        ; AX = world distance of this row
+        add ax, [road_scroll]
+        and ax, DASH_PERIOD_MASK
+        cmp ax, DASH_LENGTH
+        jae .next_row           ; this row is in a gap between dashes
+        mov cx, [rd_lw]
+        shr cx, 1               ; CX = half lane width
+        mov ax, di
+        shr ax, 1               ; AX = half line width
+        ; left lane line at centre - laneWidth/2
+        mov bx, [rd_cx]
+        sub bx, cx
+        sub bx, ax
+        push ax
+        mov ax, bx
+        add bx, di
+        dec bx
+        call hline
+        pop ax
+        ; right lane line at centre + laneWidth/2
+        mov bx, [rd_cx]
+        add bx, cx
+        sub bx, ax
+        mov ax, bx
+        add bx, di
+        dec bx
+        call hline
+.next_row:
+        inc word [rd_t]
+        cmp word [rd_t], DASH_TOP - HORIZON
+        jae .road_done          ; (short jump + JMP: .row is far)
+        jmp .row
+.road_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
 ; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
@@ -345,6 +515,7 @@ draw_sky_ground:
 ; ---------------------------------------------------------------------
 draw_highway_frame:
         call draw_sky_ground    ; sky and grass
+        call draw_road          ; element 3: road and lane lines
         ret
 
 
@@ -372,6 +543,9 @@ start:
 ; ---------------- Game values shown on the screen ---------------------
 ; Phase 1: fixed numbers, exactly like Figure 1.
 
+; ---------------- Camera / road ---------------------------------------
+cam_x16         dw 0                ; our sideways position (0 = middle)
+road_scroll     dw 0                ; moves the lane dashes
 
 
 
@@ -416,6 +590,9 @@ color           db 0                ; colour used by all shapes
 
 
 
+rd_t            dw 0                ; draw_road
+rd_cx           dw 0
+rd_lw           dw 0
 
 
 
