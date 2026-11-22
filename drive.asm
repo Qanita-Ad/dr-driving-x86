@@ -134,6 +134,11 @@ TRAFFIC_SPEED   equ 40              ; km/h, all traffic cars
 RING_BACK       equ -3000           ; a car this far behind us ...
 RING_LEN        equ 32488           ; ... is moved this far forward
 
+; ---------------- Reverse gear --------------------------------------
+MAX_REVERSE     equ 20              ; km/h when reversing
+GEAR_D          equ 'D'             ; drive
+GEAR_R          equ 'R'             ; reverse
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1603,6 +1608,28 @@ draw_speed_box:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_gear : small D (grey) or R (red) left of the speed box.
+; ---------------------------------------------------------------------
+draw_gear:
+        push ax
+        push bx
+        push dx
+        mov byte [text_scale], 1
+        mov byte [color], C_LIGHT_GREY
+        cmp byte [gear], GEAR_R
+        jne .colour_ok
+        mov byte [color], C_RED
+.colour_ok:
+        mov al, [gear]
+        mov bx, SBOX_X - 11
+        mov dx, SBOX_Y + 10
+        call draw_char
+        pop dx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_fuel_bar : element 7. "FUEL", a bar, and the letters E and F.
 ;   Filled width = FBAR_W * fuel / FUEL_MAX.
 ;   The bar is green, but red when fuel < FUEL_LOW.
@@ -1846,7 +1873,8 @@ remove_timer:
 ; =====================================================================
 
 ; ---------------------------------------------------------------------
-; player_controls : Up = accelerate, Space = brake, no pedal = coast.
+; player_controls : Up = accelerate, Space = brake, no pedal = coast,
+;   Down = reverse (only when the car is stopped).
 ; ---------------------------------------------------------------------
 player_controls:
         push ax
@@ -1855,12 +1883,32 @@ player_controls:
         ; ---- Up arrow: accelerate
         cmp byte [key_down + SC_UP], 1
         jne .no_up
+        cmp byte [gear], GEAR_D
+        je .up_drive
+        or ax, ax
+        jnz .no_up              ; still rolling backwards: Up waits
+        mov byte [gear], GEAR_D ; stopped: shift to Drive
 .up_drive:
         add ax, ACCEL
         cmp ax, MAX_SPEED * 16
         jbe .no_up
         mov ax, MAX_SPEED * 16  ; top speed reached
 .no_up:
+        ; ---- Down arrow: reverse, but ONLY when the car is stopped.
+        ;      Down never works as a brake.
+        cmp byte [key_down + SC_DOWN], 1
+        jne .no_down
+        cmp byte [gear], GEAR_R
+        je .down_reverse
+        or ax, ax
+        jnz .no_down            ; still moving forward: ignore Down
+        mov byte [gear], GEAR_R ; stopped: shift to Reverse
+.down_reverse:
+        add ax, ACCEL
+        cmp ax, MAX_REVERSE * 16
+        jbe .no_down
+        mov ax, MAX_REVERSE * 16
+.no_down:
         ; ---- Space: brake gradually until the speed is 0
         cmp byte [key_down + SC_SPACE], 1
         jne .no_brake
@@ -1869,7 +1917,10 @@ player_controls:
         xor ax, ax              ; went below 0: stop at exactly 0
 .no_brake:
         ; ---- no gas pedal held: the car slowly rolls to a stop
-        mov bl, [key_down + SC_UP]
+        mov bl, [key_down + SC_UP]      ; in D the gas pedal is Up
+        cmp byte [gear], GEAR_R
+        jne .check_gas
+        mov bl, [key_down + SC_DOWN]    ; in R the gas pedal is Down
 .check_gas:
         cmp bl, 1
         je .pedal_held
@@ -1948,6 +1999,10 @@ player_lanes:
 ; ---------------------------------------------------------------------
 player_velocity:
         mov ax, [speed_kmh]
+        cmp byte [gear], GEAR_R
+        jne .forward
+        neg ax                  ; reversing: negative speed
+.forward:
         ret
 
 ; =====================================================================
@@ -1960,11 +2015,14 @@ player_velocity:
 ;   tick the car moves exactly speed_kmh units. 262 units = 1 metre.
 ;   dist_acc collects the units; every 262 units = one more metre.
 ;   Example: at 131 km/h, every 2 ticks give one metre.
-;   Score: +10 for every metre we have never reached before.
+;   Score: +10 for every metre we have never reached before (so
+;   reversing and driving the same metres again gives no points).
 ; ---------------------------------------------------------------------
 move_car:
         push ax
         mov ax, [speed_kmh]
+        cmp byte [gear], GEAR_R
+        je .backwards
         add [road_scroll], ax   ; lane dashes slide towards us
         add [dist_acc], ax
 .metre_loop:
@@ -1978,6 +2036,20 @@ move_car:
         mov [best_distance], ax
         add word [score], SCORE_PER_METRE
         jmp .metre_loop
+        ; ---- reversing: distance goes down (never below 0)
+.backwards:
+        sub [road_scroll], ax   ; dashes slide away from us
+        sub [dist_acc], ax
+.back_loop:
+        cmp word [dist_acc], 0
+        jge .done               ; no full metre lost
+        add word [dist_acc], UNITS_PER_METRE
+        cmp word [distance], 0
+        je .at_start
+        dec word [distance]
+        jmp .back_loop
+.at_start:
+        mov word [dist_acc], 0  ; cannot go behind the start line
 .done:  pop ax
         ret
 
@@ -2017,6 +2089,7 @@ highway_start:
         mov byte [left_latch], 1    ; ignore keys that are already held
         mov byte [right_latch], 1
         call traffic_start
+        mov byte [gear], GEAR_D
         ret
 
 ; ---------------------------------------------------------------------
@@ -2040,6 +2113,7 @@ draw_highway_frame:
         call draw_bonnet        ; element 5: orange bonnet
         call draw_dashboard
         call draw_speed_box     ; element 6
+        call draw_gear          ; D or R
         call draw_fuel_bar      ; element 7
         call draw_wheel         ; element 8
         call draw_time_bar      ; element 1
@@ -2220,6 +2294,7 @@ bios_div        db 0                ; counts 0..3, BIOS runs on 4th tick
 ; ---------------- Player ----------------------------------------------
 speed_x16       dw 0                ; speed in 1/16 km/h
 player_lane     db LANE_MIDDLE      ; 0 = left, 1 = middle, 2 = right
+gear            db GEAR_D           ; 'D' = drive, 'R' = reverse
 left_latch      db 0                ; Left was held in the last tick
 right_latch     db 0                ; Right was held in the last tick
 
