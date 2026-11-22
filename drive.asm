@@ -139,6 +139,12 @@ MAX_REVERSE     equ 20              ; km/h when reversing
 GEAR_D          equ 'D'             ; drive
 GEAR_R          equ 'R'             ; reverse
 
+; ---------------- Collisions ------------------------------------------
+HIT_FRONT       equ 1100            ; car's back closer than this ...
+HIT_BACK        equ -1700           ; ... but not further behind = crash
+CRASH_PENALTY   equ 50              ; points lost in a crash
+CRASH_SHOW      equ 2 * TICKS_PER_SEC   ; "CRASH" text stays 2 seconds
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2063,6 +2069,90 @@ count_down_time:
 .done:  ret
 
 ; =====================================================================
+;  collisions  -  Did we drive into a traffic car?
+; ---------------------------------------------------------------------
+;  Our car takes the space from HIT_BACK to HIT_FRONT (world units,
+;  measured from the driver). A traffic car hits us when it is in OUR
+;  lane and its z is inside that space. HIT_FRONT is the place where
+;  a car touches the bonnet on the screen.
+;
+;  We only test while we are catching up with the traffic (our
+;  forward speed is more than 40 km/h). Right after a crash we stand
+;  still, so the same car can not hit us again; it simply drives away
+;  and we can continue.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; check_collisions : test every traffic car against our car.
+; ---------------------------------------------------------------------
+check_collisions:
+        push ax
+        push bx
+        push cx
+        push si
+        cmp word [crash_timer], 0
+        je .timer_ok
+        dec word [crash_timer]  ; CRASH text shows a bit less long
+.timer_ok:
+        call player_velocity
+        cmp ax, TRAFFIC_SPEED
+        jle .done               ; not catching up with anybody
+        mov si, traffic
+        mov cx, TRAFFIC_COUNT
+.next:  mov al, [si + CAR_LANE]
+        cmp al, [player_lane]
+        jne .skip               ; other lane: no crash
+        mov bx, [si + CAR_Z]
+        cmp bx, HIT_BACK
+        jle .skip
+        cmp bx, HIT_FRONT
+        jge .skip
+        call crash              ; car is touching us
+        jmp .done
+.skip:  add si, CAR_REC_SIZE
+        loop .next
+.done:  pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; crash : stop the car and take away CRASH_PENALTY points.
+; ---------------------------------------------------------------------
+crash:
+        push ax
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+        mov ax, [score]
+        sub ax, CRASH_PENALTY
+        jnc .score_ok
+        xor ax, ax              ; score never goes below 0
+.score_ok:
+        mov [score], ax
+        mov word [crash_timer], CRASH_SHOW
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_crash_message : big red "CRASH! -50" for 2 seconds.
+; ---------------------------------------------------------------------
+draw_crash_message:
+        cmp word [crash_timer], 0
+        je .done
+        push dx
+        push si
+        mov byte [color], C_RED
+        mov byte [text_scale], 2
+        mov si, txt_crash
+        mov dx, 40
+        call draw_string_centered
+        mov byte [text_scale], 1
+        pop si
+        pop dx
+.done:  ret
+
+; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
 ;  highway_start  : sets all values for a new game
@@ -2090,6 +2180,7 @@ highway_start:
         mov byte [right_latch], 1
         call traffic_start
         mov byte [gear], GEAR_D
+        mov word [crash_timer], 0
         ret
 
 ; ---------------------------------------------------------------------
@@ -2100,6 +2191,7 @@ highway_update:
         call player_lanes       ; lane changes
         call move_car           ; distance, score, road movement
         call traffic_update     ; other cars move
+        call check_collisions   ; crash?
         call count_down_time
         ret
 
@@ -2118,6 +2210,7 @@ draw_highway_frame:
         call draw_wheel         ; element 8
         call draw_time_bar      ; element 1
         call draw_dist_score    ; element 2
+        call draw_crash_message
         ret
 
 
@@ -2208,6 +2301,7 @@ txt_kmh         db 'km/h', 0
 txt_fuel        db 'FUEL', 0
 txt_e           db 'E', 0
 txt_f           db 'F', 0
+txt_crash       db 'CRASH! -50', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
@@ -2301,3 +2395,6 @@ right_latch     db 0                ; Right was held in the last tick
 ; ---------------- Distance --------------------------------------------
 dist_acc        dw 0                ; world units not yet a full metre
 best_distance   dw 0                ; farthest metre reached (for score)
+
+; ---------------- Collisions ------------------------------------------
+crash_timer     dw 0                ; ticks the CRASH text stays
