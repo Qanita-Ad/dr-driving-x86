@@ -306,6 +306,212 @@ fill_rect:
         pop ax
         ret
 
+; ---------------------------------------------------------------------
+; fill_circle : filled circle.  In: AX = cx, BX = cy, CX = radius
+; ---------------------------------------------------------------------
+fill_circle:
+        push dx
+        xor dx, dx              ; inner radius 0 = completely filled
+        call fill_ring
+        pop dx
+        ret
+
+; ---------------------------------------------------------------------
+; fill_ring : a thick ring (like a steering wheel).
+;   In : AX = centre x, BX = centre y, CX = outer radius,
+;        DX = inner radius (0 gives a full circle), [color]
+;
+;   Idea: for every row dy = 0 .. outer radius we need the half width
+;   of the circle on that row, i.e. the biggest x with x*x + dy*dy <= r*r.
+;   As dy grows, x only gets smaller, so we start x at r and just
+;   decrease it while the point (x, dy) is outside the circle.
+;   We do this for the outer circle and for the inner circle, then
+;   draw the part between them, above and below the centre.
+; ---------------------------------------------------------------------
+fill_ring:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov [ring_cx], ax
+        mov [ring_cy], bx
+        mov [ring_ro], cx
+        mov [ring_ri], dx
+        mov [ring_xo], cx       ; outer half width starts at ro
+        mov [ring_xi], dx       ; inner half width starts at ri
+        mov word [ring_dy], 0
+.row:
+        ; ---- shrink outer half width until xo^2 + dy^2 <= ro^2
+.shrink_outer:
+        mov ax, [ring_xo]
+        mul ax
+        mov si, ax              ; SI = xo^2
+        mov ax, [ring_dy]
+        mul ax
+        add si, ax              ; SI = xo^2 + dy^2
+        mov ax, [ring_ro]
+        mul ax                  ; AX = ro^2
+        cmp si, ax
+        jbe .outer_ok
+        dec word [ring_xo]
+        jmp .shrink_outer
+.outer_ok:
+        ; ---- is this row inside the hole of the ring?
+        mov ax, [ring_dy]
+        cmp ax, [ring_ri]
+        jae .solid_row          ; below/above the hole: full line
+.shrink_inner:
+        mov ax, [ring_xi]
+        mul ax
+        mov si, ax
+        mov ax, [ring_dy]
+        mul ax
+        add si, ax
+        mov ax, [ring_ri]
+        mul ax
+        cmp si, ax
+        jbe .inner_ok
+        dec word [ring_xi]
+        jmp .shrink_inner
+.inner_ok:
+        ; two pieces: [cx-xo , cx-xi-1] and [cx+xi+1 , cx+xo]
+        mov di, [ring_cy]
+        add di, [ring_dy]       ; row below centre
+        call .draw_two_parts
+        mov di, [ring_cy]
+        sub di, [ring_dy]       ; row above centre
+        call .draw_two_parts
+        jmp .next_row
+.solid_row:
+        mov ax, [ring_cx]
+        sub ax, [ring_xo]
+        mov bx, [ring_cx]
+        add bx, [ring_xo]
+        mov dx, [ring_cy]
+        add dx, [ring_dy]
+        call hline
+        mov dx, [ring_cy]
+        sub dx, [ring_dy]
+        call hline
+.next_row:
+        inc word [ring_dy]
+        mov ax, [ring_dy]
+        cmp ax, [ring_ro]
+        ja .ring_done           ; (short jump + JMP: target is far)
+        jmp .row
+.ring_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; helper for fill_ring: draws the left and right piece on row DI
+.draw_two_parts:
+        mov dx, di
+        mov ax, [ring_cx]
+        sub ax, [ring_xo]
+        mov bx, [ring_cx]
+        sub bx, [ring_xi]
+        dec bx
+        call hline              ; left piece
+        mov ax, [ring_cx]
+        add ax, [ring_xi]
+        inc ax
+        mov bx, [ring_cx]
+        add bx, [ring_xo]
+        call hline              ; right piece
+        ret
+
+; ---------------------------------------------------------------------
+; fill_trapezoid : shape with a flat top and flat bottom whose sides
+;   are straight lines. Used for cones and the parking bay.
+;   In : [tz_y1] top row,  [tz_xl1] [tz_xr1]  left/right x at the top
+;        [tz_y2] bottom row, [tz_xl2] [tz_xr2] left/right x at bottom
+;        [color]
+;   For each row we find the x positions by linear interpolation:
+;   x = x_top + (x_bottom - x_top) * (row - y1) / (y2 - y1)
+; ---------------------------------------------------------------------
+fill_trapezoid:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov cx, [tz_y2]
+        sub cx, [tz_y1]         ; CX = height - 1 (rows between)
+        jl .done
+        xor si, si              ; SI = row number counted from the top
+.row:
+        ; left x
+        mov ax, [tz_xl2]
+        sub ax, [tz_xl1]
+        call .interp
+        add ax, [tz_xl1]
+        mov di, ax              ; DI = left x for this row
+        ; right x
+        mov ax, [tz_xr2]
+        sub ax, [tz_xr1]
+        call .interp
+        add ax, [tz_xr1]
+        mov bx, ax
+        mov ax, di
+        mov dx, [tz_y1]
+        add dx, si
+        call hline
+        inc si
+        cmp si, cx
+        jle .row
+.done:  pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+; AX = (AX * SI) / CX    (signed, CX = 0 gives 0)
+.interp:
+        cmp cx, 0
+        jne .div_ok
+        xor ax, ax
+        ret
+.div_ok:
+        push dx
+        imul si                 ; DX:AX = AX * SI
+        idiv cx                 ; AX = DX:AX / CX
+        pop dx
+        ret
+
+; ---------------------------------------------------------------------
+; isqrt : integer square root.  In: AX = n.  Out: AX = floor(sqrt(n))
+;   Simple method: count up while (root+1)^2 is still <= n.
+; ---------------------------------------------------------------------
+isqrt:
+        push bx
+        push cx
+        push dx
+        mov cx, ax              ; CX = n
+        xor bx, bx              ; BX = root
+.try:   mov ax, bx
+        inc ax
+        mul ax                  ; DX:AX = (root+1)^2
+        or dx, dx
+        jnz .found              ; too big for 16 bits: stop
+        cmp ax, cx
+        ja .found
+        inc bx
+        jmp .try
+.found: mov ax, bx
+        pop dx
+        pop cx
+        pop bx
+        ret
+
 ; =====================================================================
 ;  road.asm  -  Sky, grass, the 3-lane road and the perspective maths
 ; ---------------------------------------------------------------------
@@ -503,6 +709,130 @@ draw_road:
         ret
 
 ; =====================================================================
+;  cockpit.asm  -  Orange bonnet, dashboard panel and steering wheel
+; ---------------------------------------------------------------------
+;  These are drawn AFTER the road and the cars, so they cover anything
+;  that is "under" our own car (this is called the painter's method:
+;  things drawn later appear in front).
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; draw_bonnet : the orange curved bonnet (element 5).
+;   The top edge is a parabola:  y = BONNET_TOP + (x-160)^2 / CURVE
+;   For every row y we need the half width of the bonnet:
+;       half = sqrt( (y - BONNET_TOP) * CURVE )
+;   and then draw one horizontal line from 160-half to 160+half.
+; ---------------------------------------------------------------------
+draw_bonnet:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov dx, BONNET_TOP
+.row:
+        mov ax, dx
+        sub ax, BONNET_TOP
+        mov cx, BONNET_CURVE
+        push dx
+        mul cx                  ; AX = (y - top) * CURVE
+        pop dx
+        call isqrt              ; AX = half width
+        mov si, ax
+        ; orange body of the bonnet
+        mov byte [color], C_ORANGE
+        mov ax, SCREEN_W / 2
+        sub ax, si
+        mov bx, SCREEN_W / 2
+        add bx, si
+        call hline
+        ; a darker 2-pixel outline at both ends of the row
+        mov byte [color], C_ORANGE_DARK
+        mov ax, SCREEN_W / 2
+        sub ax, si
+        mov bx, ax
+        inc bx
+        call hline
+        mov bx, SCREEN_W / 2
+        add bx, si
+        mov ax, bx
+        dec ax
+        call hline
+        inc dx
+        cmp dx, DASH_TOP
+        jb .row
+        ; darker line along the very top of the bonnet curve
+        mov ax, SCREEN_W / 2 - 3
+        mov bx, SCREEN_W / 2 + 3
+        mov dx, BONNET_TOP
+        call hline
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_dashboard : the dark panel across the bottom of the screen.
+; ---------------------------------------------------------------------
+draw_dashboard:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov byte [color], C_DASH
+        xor ax, ax
+        mov bx, DASH_TOP
+        mov cx, SCREEN_W
+        mov dx, SCREEN_H - DASH_TOP
+        call fill_rect
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_wheel : steering wheel in the bottom-right corner (element 8).
+;   A black ring, two horizontal spokes and a grey hub. Parts that go
+;   past the screen edge are clipped automatically by hline.
+; ---------------------------------------------------------------------
+WHEEL_X         equ 300
+WHEEL_Y         equ 187
+WHEEL_R_OUT     equ 43
+WHEEL_R_IN      equ 34
+
+draw_wheel:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov byte [color], C_WHEEL
+        mov ax, WHEEL_X
+        mov bx, WHEEL_Y
+        mov cx, WHEEL_R_OUT
+        mov dx, WHEEL_R_IN
+        call fill_ring
+        ; spokes: one bar across the middle of the wheel
+        mov ax, WHEEL_X - WHEEL_R_IN
+        mov bx, WHEEL_Y - 7
+        mov cx, 2 * WHEEL_R_IN
+        mov dx, 5
+        call fill_rect
+        ; hub
+        mov byte [color], C_HUB
+        mov ax, WHEEL_X
+        mov bx, WHEEL_Y
+        mov cx, 12
+        call fill_circle
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
 ;  Phase 1: only draws the screen with fixed values.
@@ -516,6 +846,9 @@ draw_road:
 draw_highway_frame:
         call draw_sky_ground    ; sky and grass
         call draw_road          ; element 3: road and lane lines
+        call draw_bonnet        ; element 5: orange bonnet
+        call draw_dashboard
+        call draw_wheel         ; element 8
         ret
 
 
@@ -588,6 +921,20 @@ palette:
 back_seg        dw 0                ; segment of the back buffer
 color           db 0                ; colour used by all shapes
 
+ring_cx         dw 0                ; fill_ring
+ring_cy         dw 0
+ring_ro         dw 0
+ring_ri         dw 0
+ring_xo         dw 0
+ring_xi         dw 0
+ring_dy         dw 0
+
+tz_y1           dw 0                ; fill_trapezoid
+tz_xl1          dw 0
+tz_xr1          dw 0
+tz_y2           dw 0
+tz_xl2          dw 0
+tz_xr2          dw 0
 
 
 rd_t            dw 0                ; draw_road
