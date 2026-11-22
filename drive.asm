@@ -119,6 +119,7 @@ video_init:
         mov ax, 0013h           ; AH=00 set mode, AL=13h (320x200x256)
         int 10h
         call load_palette
+        call load_font          ; (in text.asm)
 
         ; A .COM program owns its 64 KB segment (CS). DOS also gives it
         ; the free memory after it, so the next 64 KB (CS + 1000h) is ours.
@@ -510,6 +511,230 @@ isqrt:
         pop dx
         pop cx
         pop bx
+        ret
+
+; =====================================================================
+;  text.asm  -  Drawing letters and numbers in graphics mode
+; ---------------------------------------------------------------------
+;  The VGA BIOS already contains an 8x8 pixel font. We copy it once
+;  into our own memory (font_data). Each character uses 8 bytes, one
+;  byte per row. In each byte, bit 7 is the leftmost pixel.
+;
+;  Example - the letter 'P' (1 = pixel on):
+;      11111100      row 0
+;      01100110      row 1
+;      01100110      row 2
+;      01111100      row 3
+;      01100000      row 4  ... and so on
+;
+;  [text_scale] = 1 gives 8x8 letters, 2 gives 16x16, 3 gives 24x24.
+;  [color]      = colour of the letters (background is left alone).
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; load_font : copy the BIOS 8x8 font (chars 0..127) into font_data.
+;   INT 10h, AX=1130h, BH=03h returns ES:BP = address of the font.
+; ---------------------------------------------------------------------
+load_font:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        push bp
+        push ds
+        push es
+        mov ax, 1130h
+        mov bh, 03h
+        int 10h                 ; ES:BP -> BIOS font
+        mov si, bp
+        mov ax, es
+        mov ds, ax              ; DS:SI -> BIOS font
+        mov ax, cs
+        mov es, ax
+        mov di, font_data       ; ES:DI -> our copy
+        mov cx, 128 * 8
+        cld
+        rep movsb
+        pop es
+        pop ds
+        pop bp
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_char : draw one character.
+;   In : AL = character, BX = x, DX = y, [color], [text_scale]
+; ---------------------------------------------------------------------
+draw_char:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        push bp
+        and ax, 007Fh           ; only chars 0..127 exist in our copy
+        shl ax, 3               ; 8 bytes per character
+        mov si, font_data
+        add si, ax              ; SI -> first row of this character
+        mov [ch_x], bx
+        mov [ch_y], dx
+        xor bp, bp              ; BP = row number 0..7
+.row:
+        mov ah, [si]            ; AH = bit pattern of this row
+        inc si
+        xor di, di              ; DI = column 0..7
+.col:
+        shl ah, 1               ; move leftmost bit into the carry flag
+        jnc .skip               ; bit was 0 -> nothing to draw
+        push ax
+        ; pixel block position: x + col*scale , y + row*scale
+        xor ch, ch
+        mov cl, [text_scale]
+        mov ax, di
+        mul cx
+        add ax, [ch_x]
+        mov bx, ax              ; BX = block x
+        mov ax, bp
+        mul cx
+        add ax, [ch_y]
+        mov dx, ax              ; DX = block y
+        mov ax, bx              ; AX = block x
+        cmp cl, 1
+        jne .big
+        call put_pixel          ; scale 1: just one pixel (AX=x, DX=y)
+        jmp .drawn
+.big:   mov bx, dx              ; fill_rect wants AX=x BX=y CX=w DX=h
+        mov dx, cx              ; width = height = scale
+        call fill_rect
+.drawn: pop ax
+.skip:  inc di
+        cmp di, 8
+        jb .col
+        inc bp
+        cmp bp, 8
+        jb .row
+        pop bp
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_string : draw a 0-terminated string.
+;   In : SI -> string, BX = x, DX = y, [color], [text_scale]
+; ---------------------------------------------------------------------
+draw_string:
+        push ax
+        push bx
+        push cx
+        push si
+        xor ch, ch
+        mov cl, [text_scale]
+        shl cx, 3               ; CX = width of one character (8*scale)
+.next:  lodsb
+        or al, al
+        jz .done                ; 0 marks the end of the string
+        call draw_char
+        add bx, cx              ; move right by one character
+        jmp .next
+.done:  pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; string_width : width in pixels of a string at the current scale.
+;   In : SI -> string      Out: AX = width
+; ---------------------------------------------------------------------
+string_width:
+        push cx
+        push dx                 ; MUL below changes DX, so save it
+        push si
+        xor cx, cx
+.count: lodsb
+        or al, al
+        jz .counted
+        inc cx
+        jmp .count
+.counted:
+        mov ax, cx
+        shl ax, 3
+        xor ch, ch
+        mov cl, [text_scale]
+        mul cx                  ; AX = length * 8 * scale
+        pop si
+        pop dx
+        pop cx
+        ret
+
+; ---------------------------------------------------------------------
+; draw_string_centered : draw a string centred on x = 160.
+;   In : SI -> string, DX = y
+; ---------------------------------------------------------------------
+draw_string_centered:
+        push ax
+        push bx
+        call string_width
+        mov bx, SCREEN_W
+        sub bx, ax
+        sar bx, 1               ; x = (320 - width) / 2
+        call draw_string
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; number_to_string : turn an unsigned number into decimal text.
+;   In : AX = number, CX = minimum digits (leading zeros are added)
+;   Out: SI -> 0-terminated text inside num_buf
+;   Method: divide by 10 again and again; each remainder is the next
+;   digit from the right.
+; ---------------------------------------------------------------------
+number_to_string:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov si, num_buf + 6
+        mov byte [si], 0        ; end marker
+        mov bx, 10
+.digit: xor dx, dx
+        div bx                  ; AX = AX / 10, DX = remainder
+        add dl, '0'
+        dec si
+        mov [si], dl
+        dec cx
+        or ax, ax
+        jnz .digit              ; more digits left
+        cmp cx, 0
+        jg .digit               ; still need leading zeros (AX is 0)
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_number : draw an unsigned number.
+;   In : AX = number, CX = minimum digits, BX = x, DX = y
+; ---------------------------------------------------------------------
+draw_number:
+        push si
+        call number_to_string
+        call draw_string
+        pop si
         ret
 
 ; =====================================================================
@@ -1038,6 +1263,78 @@ draw_wheel:
         ret
 
 ; =====================================================================
+;  hud.asm  -  Time bar, distance & score, speed box and fuel bar
+; ---------------------------------------------------------------------
+;  HUD = "heads-up display": the numbers and bars drawn on top of the
+;  game. Each routine only READS the game variables (time_left, fuel,
+;  speed_kmh, distance, score) - it never changes them.
+;  Element numbers refer to Figure 1 of the project document.
+; =====================================================================
+
+FUEL_LOW        equ 250             ; below this the fuel bar is red
+HUD_TEXT_X      equ 40              ; left x of the DIST / SCORE text
+
+; ---------------------------------------------------------------------
+; draw_speed_box : element 6. Box with the speed as 3 yellow digits.
+; ---------------------------------------------------------------------
+SBOX_X          equ 97
+SBOX_Y          equ 171
+SBOX_W          equ 60
+SBOX_H          equ 28
+
+draw_speed_box:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        ; light border, then dark inside (1 pixel smaller on each side)
+        mov byte [color], C_LIGHT_GREY
+        mov ax, SBOX_X
+        mov bx, SBOX_Y
+        mov cx, SBOX_W
+        mov dx, SBOX_H
+        call fill_rect
+        mov byte [color], C_BOX_BG
+        mov ax, SBOX_X + 1
+        mov bx, SBOX_Y + 1
+        mov cx, SBOX_W - 2
+        mov dx, SBOX_H - 2
+        call fill_rect
+        ; cut the 4 corners so the box looks rounded
+        mov byte [color], C_DASH
+        mov ax, SBOX_X
+        mov dx, SBOX_Y
+        call put_pixel
+        mov dx, SBOX_Y + SBOX_H - 1
+        call put_pixel
+        mov ax, SBOX_X + SBOX_W - 1
+        call put_pixel
+        mov dx, SBOX_Y
+        call put_pixel
+        ; speed digits, double size, always 3 digits (e.g. 078)
+        mov byte [color], C_YELLOW
+        mov byte [text_scale], 2
+        mov ax, [speed_kmh]
+        mov cx, 3
+        mov bx, SBOX_X + (SBOX_W - 48) / 2
+        mov dx, SBOX_Y + 2
+        call draw_number
+        ; "km/h" under the digits
+        mov byte [text_scale], 1
+        mov byte [color], C_LIGHT_GREY
+        mov si, txt_kmh
+        mov bx, SBOX_X + (SBOX_W - 32) / 2
+        mov dx, SBOX_Y + 19
+        call draw_string
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
 ;  Phase 1: only draws the screen with fixed values.
@@ -1054,6 +1351,7 @@ draw_highway_frame:
         call draw_traffic       ; element 4: traffic cars
         call draw_bonnet        ; element 5: orange bonnet
         call draw_dashboard
+        call draw_speed_box     ; element 6
         call draw_wheel         ; element 8
         ret
 
@@ -1081,6 +1379,7 @@ start:
 
 ; ---------------- Game values shown on the screen ---------------------
 ; Phase 1: fixed numbers, exactly like Figure 1.
+speed_kmh       dw 78               ; shown as 078 km/h
 
 ; ---------------- Camera / road ---------------------------------------
 cam_x16         dw 0                ; our sideways position (0 = middle)
@@ -1097,6 +1396,8 @@ traffic:
         dw 2300
         db LANE_LEFT,   C_CAR_BLUE
 
+; ---------------- Text strings (0 = end of string) --------------------
+txt_kmh         db 'km/h', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
@@ -1136,6 +1437,7 @@ palette:
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
 color           db 0                ; colour used by all shapes
+text_scale      db 1                ; 1 = 8x8 letters, 2 = 16x16 ...
 
 ring_cx         dw 0                ; fill_ring
 ring_cy         dw 0
@@ -1152,6 +1454,9 @@ tz_y2           dw 0
 tz_xl2          dw 0
 tz_xr2          dw 0
 
+ch_x            dw 0                ; draw_char
+ch_y            dw 0
+num_buf         times 8 db 0        ; number_to_string
 
 rd_t            dw 0                ; draw_road
 rd_cx           dw 0
@@ -1165,4 +1470,5 @@ car_left        dw 0
 car_top         dw 0
 car_bottom      dw 0
 
+font_data       times 128 * 8 db 0  ; copy of the BIOS 8x8 font
 
