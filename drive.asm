@@ -643,6 +643,8 @@ draw_char:
         shl ax, 3               ; 8 bytes per character
         mov si, font_data
         add si, ax              ; SI -> first row of this character
+        cmp byte [text_scale], 1
+        je .fast                ; normal size: quick version below
         mov [ch_x], bx
         mov [ch_y], dx
         xor bp, bp              ; BP = row number 0..7
@@ -680,7 +682,33 @@ draw_char:
         inc bp
         cmp bp, 8
         jb .row
-        pop bp
+        jmp .done
+
+        ; ---- quick version for scale 1 (most of the text).
+        ;      Instead of calling put_pixel for every dot, we work out
+        ;      the address once and write the bytes ourselves.
+        ;      (No clipping here: our text is always fully on screen.)
+.fast:  mov di, dx
+        shl di, 6               ; y*64
+        shl dx, 8               ; y*256
+        add di, dx
+        add di, bx              ; DI = y*320 + x
+        mov al, [color]
+        mov cx, 8               ; 8 rows
+.f_row: mov ah, [si]            ; bit pattern of this row
+        inc si
+        push di
+.f_col: shl ah, 1               ; next bit into the carry flag
+        jnc .f_skip
+        mov [es:di], al         ; bit was 1: one pixel
+.f_skip:
+        inc di
+        or ah, ah
+        jnz .f_col              ; stop early when no bits are left
+        pop di
+        add di, SCREEN_W        ; same x, next row
+        loop .f_row
+.done:  pop bp
         pop di
         pop si
         pop dx
