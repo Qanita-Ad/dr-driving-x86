@@ -903,7 +903,7 @@ draw_sky_ground:
         xor ax, ax
         mov bx, HORIZON
         mov cx, SCREEN_W
-        mov dx, SCREEN_H - HORIZON
+        mov dx, DASH_TOP - HORIZON  ; the dashboard covers the rest
         call fill_rect
         pop dx
         pop cx
@@ -1326,11 +1326,41 @@ draw_traffic:
 ; =====================================================================
 
 ; ---------------------------------------------------------------------
-; draw_bonnet : the orange curved bonnet (element 5).
+; make_bonnet_table : work out the bonnet shape ONCE at the start.
 ;   The top edge is a parabola:  y = BONNET_TOP + (x-160)^2 / CURVE
 ;   For every row y we need the half width of the bonnet:
 ;       half = sqrt( (y - BONNET_TOP) * CURVE )
-;   and then draw one horizontal line from 160-half to 160+half.
+;   A square root is slow, and the bonnet never changes, so we keep
+;   the answers in the table bonnet_half (one word per row).
+; ---------------------------------------------------------------------
+make_bonnet_table:
+        push ax
+        push cx
+        push dx
+        push si
+        mov si, bonnet_half
+        xor dx, dx              ; DX = row counted from BONNET_TOP
+.row:   mov ax, dx
+        mov cx, BONNET_CURVE
+        push dx
+        mul cx                  ; AX = row * CURVE
+        pop dx
+        call isqrt              ; AX = half width
+        mov [si], ax
+        add si, 2
+        inc dx
+        cmp dx, DASH_TOP - BONNET_TOP
+        jb .row
+        pop si
+        pop dx
+        pop cx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_bonnet : the orange curved bonnet (element 5).
+;   For every row: read the half width from bonnet_half and draw one
+;   horizontal line from 160-half to 160+half.
 ; ---------------------------------------------------------------------
 draw_bonnet:
         push ax
@@ -1340,14 +1370,10 @@ draw_bonnet:
         push si
         mov dx, BONNET_TOP
 .row:
-        mov ax, dx
-        sub ax, BONNET_TOP
-        mov cx, BONNET_CURVE
-        push dx
-        mul cx                  ; AX = (y - top) * CURVE
-        pop dx
-        call isqrt              ; AX = half width
-        mov si, ax
+        mov si, dx
+        sub si, BONNET_TOP
+        shl si, 1               ; 2 bytes per table entry
+        mov si, [bonnet_half + si]  ; SI = half width of this row
         ; orange body of the bonnet
         mov byte [color], C_ORANGE
         mov ax, SCREEN_W / 2
@@ -2414,6 +2440,7 @@ start:
         call video_init         ; mode 13h, palette, font, buffer
         call install_keyboard   ; our INT 9 handler
         call install_timer      ; our INT 8 handler, 73 ticks/second
+        call make_bonnet_table  ; bonnet shape, worked out once
         mov es, [back_seg]      ; ES = back buffer for all drawing
         call highway_start
 
@@ -2602,3 +2629,6 @@ fuel_acc        dw 0                ; collects use until FUEL_DIV
 ; ---------------- Level state -----------------------------------------
 hw_state        db STATE_PLAYING    ; playing or ended
 end_msg         db 0                ; which end message to show
+
+; ---------------- Bonnet shape ----------------------------------------
+bonnet_half     times DASH_TOP - BONNET_TOP dw 0   ; half width per row
