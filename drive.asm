@@ -149,6 +149,13 @@ CRASH_SHOW      equ 2 * TICKS_PER_SEC   ; "CRASH" text stays 2 seconds
 FUEL_IDLE       equ 20              ; fuel use while moving ...
 FUEL_DIV        equ 520             ; ... (IDLE + speed) / DIV per tick
 
+; ---------------- Level state -----------------------------------------
+STATE_PLAYING   equ 0
+STATE_ENDED     equ 1
+MSG_WIN         equ 1               ; reached 1000 m
+MSG_TIME        equ 2               ; time ran out
+MSG_FUEL        equ 3               ; fuel ran out
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2213,12 +2220,18 @@ highway_start:
         mov word [crash_timer], 0
         mov word [fuel], FUEL_MAX
         mov word [fuel_acc], 0
+        mov byte [hw_state], STATE_PLAYING
         ret
 
 ; ---------------------------------------------------------------------
 ; highway_update : one game step. Called once for every timer tick.
 ; ---------------------------------------------------------------------
 highway_update:
+        cmp byte [hw_state], STATE_ENDED
+        jne .playing
+        call end_screen_keys    ; level over: only wait for ENTER
+        ret
+.playing:
         call player_controls    ; read the pedals
         call player_lanes       ; lane changes
         call move_car           ; distance, score, road movement
@@ -2226,7 +2239,122 @@ highway_update:
         call check_collisions   ; crash?
         call use_fuel           ; fuel goes down
         call count_down_time
+        call check_level_end    ; 1000 m, time up or no fuel?
         ret
+
+; ---------------------------------------------------------------------
+; check_level_end : has the level finished?
+;   1. distance reached 1000 m -> success (distance stays exactly 1000)
+;   2. time_left is 0         -> "TIME UP"
+;   3. fuel is 0              -> "NO FUEL"
+; ---------------------------------------------------------------------
+check_level_end:
+        push ax
+        cmp word [distance], LEVEL_DISTANCE
+        jb .not_finished
+        mov word [distance], LEVEL_DISTANCE
+        mov al, MSG_WIN
+        jmp .end_level
+.not_finished:
+        cmp word [time_left], 0
+        jne .time_ok
+        mov al, MSG_TIME
+        jmp .end_level
+.time_ok:
+        cmp word [fuel], 0
+        jne .done
+        mov al, MSG_FUEL
+.end_level:
+        mov [end_msg], al
+        mov byte [hw_state], STATE_ENDED
+        mov word [speed_x16], 0 ; the car stops
+        mov word [speed_kmh], 0
+.done:  pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_end_message : the box shown when the level has ended.
+; ---------------------------------------------------------------------
+MBOX_X          equ 40
+MBOX_Y          equ 55
+MBOX_W          equ 240
+MBOX_H          equ 82
+
+draw_end_message:
+        cmp byte [hw_state], STATE_ENDED
+        je .show
+        ret
+.show:  push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        ; box: light border, dark inside
+        mov byte [color], C_LIGHT_GREY
+        mov ax, MBOX_X
+        mov bx, MBOX_Y
+        mov cx, MBOX_W
+        mov dx, MBOX_H
+        call fill_rect
+        mov byte [color], C_PANEL
+        mov ax, MBOX_X + 2
+        mov bx, MBOX_Y + 2
+        mov cx, MBOX_W - 4
+        mov dx, MBOX_H - 4
+        call fill_rect
+        ; choose the two text lines for this ending
+        mov si, txt_win_1
+        mov di, txt_win_2
+        mov byte [color], C_GREEN
+        cmp byte [end_msg], MSG_WIN
+        je .write
+        mov si, txt_timeup_1
+        mov di, txt_timeup_2
+        mov byte [color], C_RED
+        cmp byte [end_msg], MSG_TIME
+        je .write
+        mov si, txt_nofuel_1
+        mov di, txt_nofuel_2
+.write: mov byte [text_scale], 2
+        mov dx, MBOX_Y + 8
+        call draw_string_centered       ; big title
+        mov byte [text_scale], 1
+        mov byte [color], C_WHITE
+        mov si, di
+        mov dx, MBOX_Y + 32
+        call draw_string_centered       ; explanation
+        ; "SCORE 1234"
+        mov byte [color], C_YELLOW
+        mov si, txt_score
+        mov bx, 120
+        mov dx, MBOX_Y + 48
+        call draw_string_adv
+        mov ax, [score]
+        mov cx, 1
+        call number_to_string
+        call draw_string_adv
+        mov byte [color], C_LIGHT_GREY
+        mov si, txt_again
+        mov dx, MBOX_Y + 66
+        call draw_string_centered
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; end_screen_keys : after the level ended, ENTER starts a new game.
+;   (ESC is checked in the main loop.)
+; ---------------------------------------------------------------------
+end_screen_keys:
+        cmp byte [key_down + SC_ENTER], 1
+        jne .wait
+        call highway_start
+.wait:  ret
 
 ; ---------------------------------------------------------------------
 ; draw_highway_frame : build one complete picture in the back buffer.
@@ -2244,6 +2372,7 @@ draw_highway_frame:
         call draw_time_bar      ; element 1
         call draw_dist_score    ; element 2
         call draw_crash_message
+        call draw_end_message   ; only when the level has ended
         ret
 
 
@@ -2335,6 +2464,13 @@ txt_fuel        db 'FUEL', 0
 txt_e           db 'E', 0
 txt_f           db 'F', 0
 txt_crash       db 'CRASH! -50', 0
+txt_win_1       db 'COMPLETE!', 0
+txt_win_2       db 'You drove 1000 m. Well done!', 0
+txt_timeup_1    db 'TIME UP!', 0
+txt_timeup_2    db 'The time has run out.', 0
+txt_nofuel_1    db 'NO FUEL!', 0
+txt_nofuel_2    db 'The fuel tank is empty.', 0
+txt_again       db 'ENTER = again   ESC = quit', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
@@ -2434,3 +2570,7 @@ crash_timer     dw 0                ; ticks the CRASH text stays
 
 ; ---------------- Fuel ------------------------------------------------
 fuel_acc        dw 0                ; collects use until FUEL_DIV
+
+; ---------------- Level state -----------------------------------------
+hw_state        db STATE_PLAYING    ; playing or ended
+end_msg         db 0                ; which end message to show
