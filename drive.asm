@@ -209,6 +209,10 @@ SPD_X           equ 112             ; speedometer centre
 SPD_Y           equ 188
 SPD_R           equ 37              ; speedometer radius
 
+FG_X            equ 220             ; fuel gauge centre
+FG_Y            equ 188
+FG_R            equ 22              ; fuel gauge radius
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -3412,7 +3416,7 @@ draw_instruments:
         call draw_gear_box      ; D / R box, bottom left
         call draw_light_panel   ; the 9 small lights
         call draw_speedometer   ; dial 0..200 km/h
-        call draw_fuel_bar      ; (replaced by the fuel gauge later)
+        call draw_fuel_gauge    ; dial E..F
         call draw_wheel         ; (replaced by the big wheel later)
         ret
 
@@ -3685,6 +3689,119 @@ draw_speedometer:
         mov bx, SPD_X - 12
         mov dx, SPD_Y + 4
         call draw_number
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; fuel_angle : AX = fuel (0..FUEL_MAX) -> AX = needle angle.
+;   E (empty) is down-left at 210 degrees, F (full) is down-right at
+;   -30 degrees, so the needle turns 240 degrees over the top.
+;       angle = 210 - fuel * 240 / FUEL_MAX
+; ---------------------------------------------------------------------
+fuel_angle:
+        push cx
+        push dx
+        mov cx, 240
+        mul cx                  ; DX:AX = fuel * 240 (can be > 65535)
+        mov cx, FUEL_MAX
+        div cx
+        neg ax
+        add ax, 210
+        pop dx
+        pop cx
+        ret
+
+; ---------------------------------------------------------------------
+; draw_fuel_gauge : element 9 of Figure 3. Round dial from E to F,
+;   a red needle, and a fuel pump icon that turns red when low.
+; ---------------------------------------------------------------------
+draw_fuel_gauge:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov word [dial_cx], FG_X
+        mov word [dial_cy], FG_Y
+        mov byte [color], C_LIGHT_GREY
+        mov ax, FG_X
+        mov bx, FG_Y
+        mov cx, FG_R
+        call fill_circle
+        mov byte [color], C_BOX_BG
+        mov cx, FG_R - 2
+        call fill_circle
+        ; ---- 5 ticks: E, 1/4, 1/2, 3/4, F
+        xor si, si
+.tick:  mov byte [color], C_WHITE
+        or si, si
+        jnz .tick_colour
+        mov byte [color], C_RED ; the E tick is red
+.tick_colour:
+        mov ax, si
+        call fuel_angle
+        mov cx, FG_R - 6
+        mov dx, FG_R - 3
+        call dial_line
+        add si, FUEL_MAX / 4
+        cmp si, FUEL_MAX
+        jbe .tick
+        ; ---- letters E and F
+        mov byte [text_scale], 1
+        mov byte [color], C_RED
+        mov al, 'E'
+        mov bx, FG_X - 14
+        mov dx, FG_Y + 2
+        call draw_char
+        mov byte [color], C_WHITE
+        mov al, 'F'
+        mov bx, FG_X + 6
+        call draw_char
+        ; ---- fuel pump icon: white, red when fuel is low
+        mov byte [color], C_WHITE
+        cmp word [fuel], FUEL_LOW
+        jae .icon_colour
+        mov byte [color], C_RED
+.icon_colour:
+        mov ax, FG_X - 5
+        mov bx, FG_Y - 12
+        mov cx, 5
+        mov dx, 8
+        call fill_rect          ; pump body
+        mov ax, FG_X
+        mov bx, FG_Y - 10
+        mov cx, 2
+        mov dx, 1
+        call fill_rect          ; hose
+        mov ax, FG_X + 1
+        mov bx, FG_Y - 10
+        mov cx, 1
+        mov dx, 5
+        call fill_rect          ; nozzle
+        mov byte [color], C_BOX_BG
+        mov ax, FG_X - 4
+        mov bx, FG_Y - 11
+        mov cx, 3
+        mov dx, 2
+        call fill_rect          ; little window of the pump
+        ; ---- needle
+        mov byte [color], C_RED
+        mov ax, [fuel]
+        call fuel_angle
+        mov cx, 0
+        mov dx, FG_R - 4
+        call dial_line
+        inc word [dial_cx]
+        call dial_line
+        mov byte [color], C_HUB
+        mov ax, FG_X
+        mov bx, FG_Y
+        mov cx, 2
+        call fill_circle
         pop si
         pop dx
         pop cx
