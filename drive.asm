@@ -155,7 +155,7 @@ GEAR_R          equ 'R'             ; reverse
 
 ; ---------------- Collisions ------------------------------------------
 HIT_FRONT       equ 1100            ; car's back closer than this ...
-HIT_BACK        equ -1700           ; ... but not further behind = crash
+HIT_MIN         equ 560             ; ... and at least this far = crash
 CRASH_PENALTY   equ 50              ; points lost in a crash
 CRASH_SHOW      equ 2 * TICKS_PER_SEC   ; "CRASH" text stays 2 seconds
 
@@ -2259,10 +2259,12 @@ count_down_time:
 ; =====================================================================
 ;  collisions  -  Did we drive into a traffic car?
 ; ---------------------------------------------------------------------
-;  Our car takes the space from HIT_BACK to HIT_FRONT (world units,
-;  measured from the driver). A traffic car hits us when it is in OUR
-;  lane and its z is inside that space. HIT_FRONT is the place where
-;  a car touches the bonnet on the screen.
+;  A traffic car hits us when it is in OUR lane and its z (distance
+;  in front of the driver) is between HIT_MIN and HIT_FRONT. That is
+;  exactly where a car is seen touching our bonnet on the screen.
+;  Cars that are beside us or behind us (z < HIT_MIN) are not on the
+;  screen, so they NEVER count as a crash: you only lose points for a
+;  car you could see.
 ;
 ;  We only test while we are catching up with the traffic (our
 ;  forward speed is more than 40 km/h). Right after a crash we stand
@@ -2291,8 +2293,8 @@ check_collisions:
         cmp al, [player_lane]
         jne .skip               ; other lane: no crash
         mov bx, [si + CAR_Z]
-        cmp bx, HIT_BACK
-        jle .skip
+        cmp bx, HIT_MIN
+        jl .skip                ; beside or behind us: not visible
         cmp bx, HIT_FRONT
         jge .skip
         call crash              ; car is touching us
