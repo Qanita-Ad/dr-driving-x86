@@ -91,7 +91,9 @@ C_SHADOW        equ 44              ; shadow under a car
 C_BUMPER        equ 45              ; dark grey bumper
 C_CURB          equ 46              ; kerb between road and pavement
 C_WIN_LIT       equ 47              ; yellow lit window
-PALETTE_COUNT   equ 48              ; how many colours we define
+C_ORANGE_LIGHT  equ 48              ; shine on the bonnet
+C_DASH_EDGE     equ 49              ; top edge of the dashboard
+PALETTE_COUNT   equ 50              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -1739,7 +1741,7 @@ draw_time_bar:
         mov si, txt_time
         mov bx, 2
         mov dx, 12
-        call draw_string
+        call draw_hud_text      ; (shadow in the original layout)
         ; ---- black track with round ends
         mov byte [color], C_BAR_BG
         mov ax, TBAR_X
@@ -1793,23 +1795,23 @@ draw_dist_score:
         mov bx, HUD_TEXT_X
         mov dx, 3
         mov si, txt_dist
-        call draw_string_adv
+        call draw_hud_text
         mov ax, [distance]
         mov cx, 1
         call number_to_string   ; SI -> digits
-        call draw_string_adv
+        call draw_hud_text
         mov si, txt_dist_end
-        call draw_string_adv
+        call draw_hud_text
         ; score line in yellow
         mov byte [color], C_YELLOW
         mov bx, HUD_TEXT_X
         mov dx, 13
         mov si, txt_score
-        call draw_string_adv
+        call draw_hud_text
         mov ax, [score]
         mov cx, 1
         call number_to_string
-        call draw_string_adv
+        call draw_hud_text
         pop si
         pop dx
         pop cx
@@ -1832,11 +1834,11 @@ draw_score_only:
         mov bx, 4               ; top-left corner, as in Figure 2
         mov dx, 2
         mov si, txt_score
-        call draw_string_adv
+        call draw_hud_text
         mov ax, [score]
         mov cx, 1
         call number_to_string
-        call draw_string_adv
+        call draw_hud_text
         pop si
         pop dx
         pop cx
@@ -3771,6 +3773,7 @@ draw_instruments:
         call draw_wheel         ; element 8
         ret
 .original:
+        call draw_cockpit_shine ; bonnet shine, dashboard edge
         call draw_gear_box      ; D / R box, bottom left
         call draw_light_panel   ; the 9 small lights
         call draw_lane_guide    ; arrows at the top
@@ -4769,6 +4772,89 @@ draw_park_scenery:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_hud_text : like draw_string_adv, but in the original layout the
+;   text first gets a black shadow 1 pixel down and right, so it can
+;   be read on top of the light buildings (as in Figure 3).
+;   In: SI -> text, BX = x, DX = y.   Out: BX = x after the text.
+; ---------------------------------------------------------------------
+draw_hud_text:
+        cmp byte [layout], LAYOUT_ORIGINAL
+        jne .plain
+        push ax
+        push bx
+        push dx
+        mov al, [color]
+        push ax                 ; remember the text colour
+        mov byte [color], C_BLACK
+        inc bx
+        inc dx
+        call draw_string        ; shadow
+        pop ax
+        mov [color], al
+        pop dx
+        pop bx
+        pop ax
+.plain: jmp draw_string_adv     ; the text itself
+
+; ---------------------------------------------------------------------
+; draw_cockpit_shine : original layout. A light line along the bonnet
+;   (the shine in Figure 3), a darker band at its lower edge, and a
+;   light + dark line on the top edge of the dashboard.
+;   The shine follows the bonnet curve, 6 pixels lower:
+;       y = BONNET_TOP + (x - 160)^2 / BONNET_CURVE + 6
+; ---------------------------------------------------------------------
+draw_cockpit_shine:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [color], C_ORANGE_LIGHT
+        mov si, 60              ; SI = x
+.shine: mov ax, si
+        sub ax, SCREEN_W / 2
+        imul ax                 ; AX = (x - 160)^2
+        mov cx, BONNET_CURVE
+        div cx
+        add ax, BONNET_TOP + 6
+        mov dx, ax
+        mov ax, si
+        call put_pixel
+        inc si
+        cmp si, 200
+        jb .shine
+        ; ---- darker band: the 3 lowest rows of the bonnet
+        mov byte [color], C_ORANGE_DARK
+        mov dx, DASH_TOP - 3
+.band:  mov si, dx
+        sub si, BONNET_TOP
+        shl si, 1
+        mov cx, [bonnet_half + si]
+        mov ax, SCREEN_W / 2
+        sub ax, cx
+        mov bx, SCREEN_W / 2
+        add bx, cx
+        call hline
+        inc dx
+        cmp dx, DASH_TOP
+        jb .band
+        ; ---- dashboard edge: light line, then a black line
+        mov byte [color], C_DASH_EDGE
+        xor ax, ax
+        mov bx, SCREEN_W - 1
+        mov dx, DASH_TOP
+        call hline
+        mov byte [color], C_BLACK
+        inc dx
+        call hline
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_gear_box : rounded box with a ring and a big D (green) or
 ;   R (red), bottom left of the dashboard.
 ; ---------------------------------------------------------------------
@@ -5025,6 +5111,8 @@ palette:
         db 14, 14, 15           ; 45 C_BUMPER
         db 33, 33, 34           ; 46 C_CURB
         db 62, 57, 35           ; 47 C_WIN_LIT
+        db 62, 42, 22           ; 48 C_ORANGE_LIGHT
+        db 19, 19, 20           ; 49 C_DASH_EDGE
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
