@@ -89,7 +89,9 @@ C_BUSH          equ 42              ; round trees
 C_FENCE         equ 43              ; fence behind the lot
 C_SHADOW        equ 44              ; shadow under a car
 C_BUMPER        equ 45              ; dark grey bumper
-PALETTE_COUNT   equ 46              ; how many colours we define
+C_CURB          equ 46              ; kerb between road and pavement
+C_WIN_LIT       equ 47              ; yellow lit window
+PALETTE_COUNT   equ 48              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -243,7 +245,8 @@ W2_Y            equ 170
 W2_R_OUT        equ 46
 W2_R_IN         equ 38
 
-WALL_X16        equ 40              ; building fronts: 2.5 lanes out
+WALL_X16        equ 33              ; building fronts: narrow pavement
+CURB_X16        equ 26              ; outer side of the kerb
 
 OVERTAKE_Z      equ -1800           ; a car this close behind us overtakes
 
@@ -253,6 +256,10 @@ MIR_Y           equ 24
 MIR_W           equ 64
 MIR_H           equ 16
 MIR_RANGE       equ 6000            ; shows cars up to ~23 m behind us
+
+SHOP_H          equ 8               ; shop front height (1/16 lanes)
+WIN_H           equ 6               ; window height
+FLOOR_H         equ 11              ; one floor = window + wall
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -4520,6 +4527,7 @@ draw_city:
         mov bx, ax
         mov cl, 11
         shr bx, cl              ; building number (2048 units each)
+        mov [city_bno], bl      ; (used to choose the lit windows)
         and bx, 3               ; 4 different buildings, repeating
         mov al, [bld_colour + bx]
         mov [city_col], al
@@ -4533,6 +4541,30 @@ draw_city:
         mov cl, 4
         shr ax, cl
         mov [city_hpx], ax
+        ; ---- kerbs: a darker strip just outside both road edges
+        mov byte [color], C_CURB
+        mov ax, [city_t]
+        mov bx, -CURB_X16
+        call lane_x
+        push ax
+        mov ax, [city_t]
+        mov bx, -24
+        call lane_x
+        mov bx, ax
+        pop ax
+        mov dx, [city_t]
+        add dx, HORIZON
+        call hline              ; left kerb
+        mov ax, [city_t]
+        mov bx, 24
+        call lane_x
+        push ax
+        mov ax, [city_t]
+        mov bx, CURB_X16
+        call lane_x
+        mov bx, ax
+        pop ax
+        call hline              ; right kerb
         ; ---- left wall: columns from x(t) to x(t-1) - 1
         mov ax, [city_t]
         mov bx, -WALL_X16
@@ -4580,8 +4612,8 @@ draw_city:
 ;   Heights are in 1/16 lanes and become pixels with .px, so the
 ;   shop front and the windows are always at the same height above
 ;   the street, like real floors:
-;     shop front : 0 .. 14
-;     windows    : 22 .. 36, 48 .. 62, 74 .. 88, ... (every 26)
+;     shop front : 0 .. SHOP_H
+;     windows    : WIN_H high, one floor every FLOOR_H
 .column:
         push ax
         push bx
@@ -4616,9 +4648,9 @@ draw_city:
         call vline
         cmp cx, 80
         jb .col_done            ; gap: nothing more to draw
-        ; ---- brown shop front: height 0 .. 14
+        ; ---- brown shop front: height 0 .. SHOP_H
         mov byte [color], C_BLD_BASE
-        mov ax, 14
+        mov ax, SHOP_H
         call .px
         mov bx, di
         sub bx, ax
@@ -4631,12 +4663,25 @@ draw_city:
         cmp cx, 1900
         ja .col_done            ; no window right at the building end
         mov byte [color], C_BLD_WIN
-        mov cx, 22              ; CX = height of the window bottom
+        mov cx, SHOP_H + 4      ; CX = height of the window bottom
 .window:
         mov ax, cx
-        add ax, 14
+        add ax, WIN_H
         cmp ax, [city_h]
         ja .col_done            ; window would be above the roof
+        ; lit (yellow) or dark window: depends on building and floor
+        mov ax, cx
+        mov bl, FLOOR_H
+        div bl                  ; AL = floor number
+        add al, [city_bno]
+        and al, 3
+        mov byte [color], C_BLD_WIN
+        cmp al, 1
+        jne .win_colour
+        mov byte [color], C_WIN_LIT
+.win_colour:
+        mov ax, cx
+        add ax, WIN_H
         call .px
         mov bx, di
         sub bx, ax              ; BX = window top row
@@ -4648,7 +4693,7 @@ draw_city:
         jl .col_done            ; already above the screen
         mov ax, si
         call vline
-        add cx, 26              ; next floor
+        add cx, FLOOR_H         ; next floor
         jmp .window
 .col_done:
         pop di
@@ -4968,16 +5013,18 @@ palette:
         db  5, 17, 10           ; 33 C_GREEN_DIM
         db 32,  8,  8           ; 34 C_HAZARD
         db 44, 44, 45           ; 35 C_SIDEWALK
-        db 56, 50, 41           ; 36 C_BLD_1
-        db 40, 42, 49           ; 37 C_BLD_2
-        db 51, 42, 32           ; 38 C_BLD_3
-        db 50, 51, 54           ; 39 C_BLD_4
-        db 27, 17, 14           ; 40 C_BLD_BASE
-        db 24, 29, 37           ; 41 C_BLD_WIN
+        db 45, 48, 53           ; 36 C_BLD_1  light blue-grey
+        db 58, 54, 47           ; 37 C_BLD_2  cream
+        db 54, 46, 40           ; 38 C_BLD_3  light brown
+        db 51, 51, 53           ; 39 C_BLD_4  light grey
+        db 30, 21, 17           ; 40 C_BLD_BASE
+        db 27, 33, 44           ; 41 C_BLD_WIN
         db 24, 37, 26           ; 42 C_BUSH
         db 22, 25, 24           ; 43 C_FENCE
         db  8,  8,  9           ; 44 C_SHADOW
         db 14, 14, 15           ; 45 C_BUMPER
+        db 33, 33, 34           ; 46 C_CURB
+        db 62, 57, 35           ; 47 C_WIN_LIT
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
@@ -5144,3 +5191,4 @@ mr_x            dw 0                ; draw_mirror: car in the glass
 mr_y            dw 0
 mr_w            dw 0
 mr_h            dw 0
+city_bno        db 0                ; building number (lit windows)
