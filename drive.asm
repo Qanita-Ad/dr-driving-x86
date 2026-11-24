@@ -245,6 +245,13 @@ WALL_X16        equ 40              ; building fronts: 2.5 lanes out
 
 OVERTAKE_Z      equ -1800           ; a car this close behind us overtakes
 
+; ---------------- Rear-view mirror ------------------------------------
+MIR_X           equ 128             ; glass: left, top, width, height
+MIR_Y           equ 24
+MIR_W           equ 64
+MIR_H           equ 16
+MIR_RANGE       equ 6000            ; shows cars up to ~23 m behind us
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2382,6 +2389,7 @@ draw_crash_message:
 ;  highway.asm  -  Level 1: the highway screen
 ; ---------------------------------------------------------------------
 ;  highway_start  : sets all values for a new game
+;  draw_mirror    : rear-view mirror with the cars behind us
 ;  highway_update : one game step (called once per timer tick)
 ;  draw_highway_frame : draws the picture. Order matters (painter's
 ;  method): background, road, cars, our own car, then the HUD.
@@ -2563,6 +2571,176 @@ end_screen_keys:
 .wait:  ret
 
 ; ---------------------------------------------------------------------
+; draw_mirror : rear-view mirror at the top of the screen.
+;   Every traffic car with z between -MIR_RANGE and 0 is behind us.
+;   For such a car, d = -z is how far behind it is:
+;     size   = 16 - d * 10 / MIR_RANGE    (16 px near, 6 px far)
+;     bottom = lower in the glass when it is near
+;     x      = centre + (its lane - our lane) * size * 5/4
+;   (left lanes appear on the left, like in a real mirror).
+;   We see the FRONT of these cars: windscreen and yellow headlights.
+; ---------------------------------------------------------------------
+draw_mirror:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        ; ---- black frame, sky and road in the glass
+        mov byte [color], C_WHEEL
+        mov ax, MIR_X - 2
+        mov bx, MIR_Y - 2
+        mov cx, MIR_W + 4
+        mov dx, MIR_H + 4
+        call fill_rect
+        mov byte [color], C_SKY
+        mov ax, MIR_X
+        mov bx, MIR_Y
+        mov cx, MIR_W
+        mov dx, 6
+        call fill_rect
+        mov byte [color], C_ROAD
+        mov bx, MIR_Y + 6
+        mov dx, MIR_H - 6
+        call fill_rect
+        ; ---- cars behind us
+        mov si, traffic
+        mov cx, TRAFFIC_COUNT
+.next:  push cx
+        mov ax, [si + CAR_Z]
+        cmp ax, 0
+        jle .is_behind
+        jmp .skip               ; in front of us: not in the mirror
+.is_behind:
+        neg ax                  ; AX = distance behind us
+        cmp ax, MIR_RANGE
+        jb .in_range
+        jmp .skip               ; too far behind
+.in_range:
+        mov di, ax              ; DI = distance
+        ; size = 16 - d * 10 / MIR_RANGE
+        mov bx, 10
+        mul bx
+        mov bx, MIR_RANGE
+        div bx
+        mov bx, 16
+        sub bx, ax
+        mov [mr_w], bx
+        shr bx, 1
+        mov [mr_h], bx          ; height = size / 2
+        ; bottom row = MIR_Y + MIR_H - 1 - d * (MIR_H - 7) / MIR_RANGE
+        mov ax, di
+        mov bx, MIR_H - 7
+        mul bx
+        mov bx, MIR_RANGE
+        div bx
+        mov bx, MIR_Y + MIR_H
+        sub bx, ax
+        sub bx, [mr_h]
+        mov [mr_y], bx          ; top row of the car
+        ; x = centre + (lane - our lane) * size * 5/4 - size/2
+        mov al, [si + CAR_LANE]
+        sub al, [player_lane]
+        cbw                     ; AX = lane difference (-2..2)
+        mov bx, [mr_w]
+        mov cx, bx
+        shr cx, 2
+        add bx, cx              ; BX = size * 5/4 (one lane)
+        imul bx
+        add ax, MIR_X + MIR_W / 2
+        mov bx, [mr_w]
+        shr bx, 1
+        sub ax, bx
+        mov [mr_x], ax          ; left x of the car
+        ; ---- body
+        mov dl, [si + CAR_COLOUR]
+        mov [color], dl
+        mov ax, [mr_x]
+        mov bx, [mr_y]
+        mov cx, [mr_w]
+        mov dx, [mr_h]
+        call mirror_box
+        ; ---- windscreen (upper half, a bit narrower)
+        mov byte [color], C_WINDOW
+        mov ax, [mr_x]
+        inc ax
+        mov cx, [mr_w]
+        sub cx, 2
+        mov dx, [mr_h]
+        shr dx, 1
+        call mirror_box
+        ; ---- two yellow headlights at the bottom corners
+        mov byte [color], C_YELLOW
+        mov ax, [mr_x]
+        mov bx, [mr_y]
+        add bx, [mr_h]
+        dec bx
+        mov cx, [mr_w]
+        shr cx, 2
+        mov dx, 1
+        call mirror_box
+        add ax, [mr_w]
+        sub ax, cx
+        call mirror_box
+.skip:  pop cx
+        add si, CAR_REC_SIZE
+        dec cx
+        jz .done
+        jmp .next
+.done:  pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; mirror_box : fill_rect, but cut to the glass of the mirror.
+;   In: AX = x, BX = y, CX = width, DX = height, [color]
+; ---------------------------------------------------------------------
+mirror_box:
+        push ax
+        push bx
+        push cx
+        push dx
+        cmp ax, MIR_X           ; cut on the left
+        jge .left_ok
+        add cx, ax
+        sub cx, MIR_X
+        mov ax, MIR_X
+.left_ok:
+        push ax                 ; cut on the right
+        add ax, cx
+        cmp ax, MIR_X + MIR_W
+        pop ax
+        jle .right_ok
+        mov cx, MIR_X + MIR_W
+        sub cx, ax
+.right_ok:
+        cmp bx, MIR_Y           ; cut at the top
+        jge .top_ok
+        add dx, bx
+        sub dx, MIR_Y
+        mov bx, MIR_Y
+.top_ok:
+        push bx                 ; cut at the bottom
+        add bx, dx
+        cmp bx, MIR_Y + MIR_H
+        pop bx
+        jle .bottom_ok
+        mov dx, MIR_Y + MIR_H
+        sub dx, bx
+.bottom_ok:
+        call fill_rect          ; does nothing if width/height <= 0
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_highway_frame : build one complete picture in the back buffer.
 ; ---------------------------------------------------------------------
 draw_highway_frame:
@@ -2574,6 +2752,7 @@ draw_highway_frame:
         call draw_instruments   ; elements 6, 7, 8 (depends on layout)
         call draw_time_bar      ; element 1
         call draw_dist_score    ; element 2
+        call draw_mirror        ; cars behind us
         call draw_crash_message
         call draw_end_message   ; only when the level has ended
         ret
@@ -4870,3 +5049,7 @@ city_h          dw 0                ; height (1/16 lanes)
 city_hpx        dw 0                ; height in pixels on this row
 bld_colour      db C_BLD_1, C_BLD_2, C_BLD_3, C_BLD_4
 bld_height      dw 70, 100, 85, 120
+mr_x            dw 0                ; draw_mirror: car in the glass
+mr_y            dw 0
+mr_w            dw 0
+mr_h            dw 0
