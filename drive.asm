@@ -227,6 +227,11 @@ IND_R_X         equ 192             ; right indicator centre
 IND_Y           equ 179
 HAZ_X           equ 174             ; hazard triangle centre
 
+W2_X            equ 280             ; original wheel centre
+W2_Y            equ 170
+W2_R_OUT        equ 46
+W2_R_IN         equ 38
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -3447,7 +3452,7 @@ draw_instruments:
         call draw_speedometer   ; dial 0..200 km/h
         call draw_indicators    ; green arrows and hazard
         call draw_fuel_gauge    ; dial E..F
-        call draw_wheel         ; (replaced by the big wheel later)
+        call draw_wheel2        ; big wheel with 3 spokes
         ret
 
 ; ---------------------------------------------------------------------
@@ -4042,6 +4047,57 @@ draw_indicators:
         sub ax, bx
         mov [ln_y2], ax         ; back to the top
         call draw_line
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_wheel2 : element 10 of Figure 3. Big black wheel with a grey
+;   inner edge, spokes to the left, right and down, and a hub with S.
+; ---------------------------------------------------------------------
+draw_wheel2:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov byte [color], C_WHEEL
+        mov ax, W2_X
+        mov bx, W2_Y
+        mov cx, W2_R_OUT
+        mov dx, W2_R_IN
+        call fill_ring          ; rim
+        mov byte [color], C_HUB
+        mov cx, W2_R_IN + 1
+        mov dx, W2_R_IN - 1
+        call fill_ring          ; grey inner edge of the rim
+        ; ---- spokes
+        mov byte [color], C_WHEEL
+        mov ax, W2_X - W2_R_IN
+        mov bx, W2_Y - 4
+        mov cx, 2 * W2_R_IN
+        mov dx, 7
+        call fill_rect          ; left and right spokes
+        mov ax, W2_X - 4
+        mov bx, W2_Y
+        mov cx, 8
+        mov dx, W2_R_IN
+        call fill_rect          ; spoke going down
+        ; ---- hub: black ring, grey middle, letter S
+        mov ax, W2_X
+        mov bx, W2_Y
+        mov cx, 13
+        call fill_circle
+        mov byte [color], C_LIGHT_GREY
+        mov cx, 8
+        call fill_circle
+        mov byte [color], C_WHEEL
+        mov byte [text_scale], 1
+        mov al, 'S'
+        mov bx, W2_X - 3
+        mov dx, W2_Y - 4
+        call draw_char
+        pop dx
+        pop cx
+        pop bx
         pop ax
         ret
 
