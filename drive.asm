@@ -189,6 +189,11 @@ OBJ_SIZE        equ 8
 KIND_CAR        equ 0
 KIND_CONE       equ 1
 
+; ---------------- Parking sensor --------------------------------------
+SENSOR_Y        equ 122             ; row of the "SENSOR 0.8 m" text
+SEG_X           equ 121             ; left x of the 8 lights
+SEG_STEP        equ 10              ; 8 pixels light + 2 pixels gap
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2643,6 +2648,7 @@ parking_start:
         mov word [crash_timer], 0
         mov byte [hw_state], STATE_PLAYING
         mov word [tick_count], 0
+        call park_sensor        ; correct reading from the first frame
         ret
 
 ; ---------------------------------------------------------------------
@@ -2685,6 +2691,7 @@ parking_update:
 .timer_ok:
         call use_fuel
         call count_down_time
+        call park_sensor        ; measure the nearest gap
         ret
 
 ; ---------------------------------------------------------------------
@@ -2911,12 +2918,130 @@ draw_cone:
         ret
 
 ; ---------------------------------------------------------------------
+; park_sensor : distance from our car to the nearest object in our
+;   lane, in front of us OR behind us.
+;      in front : object start - our front  = OBJ_ZS - (park_z+CAR_FRONT)
+;      behind   : our back - object end     = (park_z-CAR_BACK) - OBJ_ZE
+;   The smallest gap is kept in sensor_gap (world units), and also
+;   in decimetres in sensor_dm (shown as metres with one decimal).
+; ---------------------------------------------------------------------
+park_sensor:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov word [sensor_gap], 32767    ; "nothing found" = very far
+        mov dx, [park_z]
+        add dx, CAR_FRONT       ; DX = our front
+        mov bx, [park_z]
+        sub bx, CAR_BACK        ; BX = our back
+        mov si, park_objects
+        mov cx, PARK_OBJ_COUNT
+.next:  mov al, [si + OBJ_LANE]
+        cmp al, [player_lane]
+        jne .skip               ; only our lane
+        mov ax, [si + OBJ_ZS]
+        sub ax, dx              ; gap to an object in front
+        jge .compare
+        mov ax, bx
+        sub ax, [si + OBJ_ZE]   ; gap to an object behind
+        jl .skip
+.compare:
+        cmp ax, [sensor_gap]
+        jge .skip
+        mov [sensor_gap], ax    ; nearest so far
+.skip:  add si, OBJ_SIZE
+        loop .next
+        ; ---- decimetres = units * 10 / 262  (shown up to 9.9 m)
+        mov ax, [sensor_gap]
+        cmp ax, 2594            ; 2594 units = 9.9 m
+        jbe .in_range
+        mov ax, 2594
+.in_range:
+        mov cx, 10
+        mul cx
+        mov cx, UNITS_PER_METRE
+        div cx
+        mov [sensor_dm], ax
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_sensor : "SENSOR 0.8 m" and a bar of 8 lights.
+;   lights on = 8 - (distance in dm) / 6, at least 1
+;   (every 0.6 m closer turns on one more light).
+;   Lights 1-3 are green, 4-5 yellow, 6-8 red, so the bar changes
+;   from green to yellow to red as we get closer.
+; ---------------------------------------------------------------------
+draw_sensor:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        ; ---- how many lights are on?
+        mov ax, [sensor_dm]
+        mov bl, 6
+        div bl                  ; AL = dm / 6
+        xor ah, ah
+        mov cx, 8
+        sub cx, ax
+        cmp cx, 1
+        jge .lit_ok
+        mov cx, 1
+.lit_ok:
+        mov [sensor_lit], cx
+        mov byte [color], C_WHITE
+        ; ---- put the digits into "SENSOR 0.0 m"
+        mov ax, [sensor_dm]
+        mov bl, 10
+        div bl                  ; AL = metres, AH = tenths
+        add al, '0'
+        mov [sensor_txt + 7], al
+        add ah, '0'
+        mov [sensor_txt + 9], ah
+        mov byte [text_scale], 1
+        mov si, sensor_txt
+        mov dx, SENSOR_Y
+        call draw_string_centered
+        ; ---- the 8 lights
+        xor si, si              ; SI = light number 0..7
+.light: mov byte [color], C_DIM ; off
+        cmp si, [sensor_lit]
+        jae .off
+        mov al, [seg_colours + si]
+        mov [color], al         ; on: its own colour
+.off:   mov ax, si
+        mov bl, SEG_STEP
+        mul bl
+        add ax, SEG_X           ; AX = x of this light
+        mov bx, SENSOR_Y + 10
+        mov cx, SEG_STEP - 2
+        mov dx, 5
+        call fill_rect
+        inc si
+        cmp si, 8
+        jb .light
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_parking_frame : the whole parking picture (painter's method).
 ; ---------------------------------------------------------------------
 draw_parking_frame:
         call draw_lot           ; sky, trees, lot floor, lane lines
         call draw_bay           ; green bay with the letter P
         call draw_park_objects  ; parked cars and cones
+        call draw_sensor        ; distance to the nearest object
         call draw_bonnet
         call draw_dashboard
         call draw_speed_box
@@ -3381,3 +3506,12 @@ cone_hw         dw 0
 cone_h          dw 0
 cone_top        dw 0
 three           dw 3
+
+; ---------------- Parking sensor --------------------------------------
+sensor_gap      dw 0                ; nearest gap in world units
+sensor_dm       dw 0                ; the same in decimetres (0..99)
+sensor_lit      dw 0                ; how many lights are on
+sensor_txt      db 'SENSOR 0.0 m', 0
+seg_colours     db C_SENSOR_GRN, C_SENSOR_GRN, C_SENSOR_GRN
+                db C_SENSOR_YEL, C_SENSOR_YEL
+                db C_RED, C_RED, C_RED
