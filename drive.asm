@@ -198,6 +198,8 @@ MSG_PARKED      equ 4               ; parked in the bay
 PARK_HOLD       equ TICKS_PER_SEC / 2   ; must stay parked 0.5 s
 TOUCH_GAP       equ 40              ; closer than 40 units = touching
 
+END_WAIT        equ 8 * TICKS_PER_SEC   ; end message stays 8 seconds
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2456,11 +2458,15 @@ draw_end_message:
 
 ; ---------------------------------------------------------------------
 ; end_screen_keys : after the level ended, ENTER goes to the menu.
+;   If nobody presses ENTER, we go back by ourselves after 8 seconds.
 ; ---------------------------------------------------------------------
 end_screen_keys:
+        inc word [end_timer]
+        cmp word [end_timer], END_WAIT
+        jae .back               ; waited long enough
         cmp byte [key_down + SC_ENTER], 1
         jne .wait
-        call go_menu
+.back:  call go_menu
 .wait:  ret
 
 ; ---------------------------------------------------------------------
@@ -2537,6 +2543,7 @@ go_menu:
         mov byte [game_mode], MODE_MENU
         mov byte [esc_latch], 1 ; ESC must be let go before it quits
         mov word [cam_x16], 0   ; road straight behind the menu
+        mov word [end_timer], 0 ; ready for the next level's ending
         ret
 
 ; ---------------------------------------------------------------------
@@ -2575,7 +2582,7 @@ menu_update:
 MENU_X          equ 40
 MENU_Y          equ 44
 MENU_W          equ 240
-MENU_H          equ 54
+MENU_H          equ 98
 
 draw_menu:
         push ax
@@ -2620,6 +2627,17 @@ draw_menu:
         mov byte [color], C_LIGHT_GREY
         mov si, txt_menu_esc
         mov dx, MENU_Y + 38
+        call draw_string
+        ; ---- controls
+        mov bx, MENU_X + 12
+        mov si, txt_help_1
+        mov dx, MENU_Y + 56
+        call draw_string
+        mov si, txt_help_2
+        mov dx, MENU_Y + 68
+        call draw_string
+        mov si, txt_help_3
+        mov dx, MENU_Y + 80
         call draw_string
         pop si
         pop dx
@@ -3440,13 +3458,16 @@ txt_timeup_1    db 'TIME UP!', 0
 txt_timeup_2    db 'The time has run out.', 0
 txt_nofuel_1    db 'NO FUEL!', 0
 txt_nofuel_2    db 'The fuel tank is empty.', 0
-txt_again       db 'ENTER = back to menu', 0
+txt_again       db 'ENTER = menu (or wait 8 s)', 0
 txt_park_1      db 'PARKED!', 0
 txt_park_2      db 'Inside the bay. Well done!', 0
 txt_title       db 'DR. DRIVING LITE', 0
 txt_menu_1      db '1   HIGHWAY    (Level 1)', 0
 txt_menu_2      db '2   PARKING    (Level 2)', 0
 txt_menu_esc    db 'ESC QUIT', 0
+txt_help_1      db 'UP = gas     SPACE = brake', 0
+txt_help_2      db 'LEFT / RIGHT = change lane', 0
+txt_help_3      db 'DOWN = reverse (at 0 km/h)', 0
 txt_banner      db 'PARKING ', 7, ' LEVEL 2', 0   ; 7 = round dot
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
@@ -3560,6 +3581,7 @@ bonnet_half     times DASH_TOP - BONNET_TOP dw 0   ; half width per row
 game_mode       db MODE_MENU        ; what the game is doing now
 quit_flag       db 0                ; 1 = leave the game loop
 esc_latch       db 0                ; ESC was held in the last tick
+end_timer       dw 0                ; ticks since the level ended
 
 ; ---------------- Parking level ---------------------------------------
 park_z          dw 0                ; our position along the lot
