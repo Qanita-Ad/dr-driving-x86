@@ -243,6 +243,8 @@ W2_R_IN         equ 38
 
 WALL_X16        equ 40              ; building fronts: 2.5 lanes out
 
+OVERTAKE_Z      equ -1800           ; a car this close behind us overtakes
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1283,6 +1285,11 @@ draw_car:
 ;  RING_LEN units: a car that falls more than 3000 units behind us is
 ;  put RING_LEN units further forward, near the horizon. So the same
 ;  pattern of cars (traffic_pattern) repeats again and again.
+;
+;  When we drive slower than 40 km/h, cars come up behind us. A car
+;  that reaches us in OUR lane does not drive through our car: it
+;  changes to another lane and overtakes us. When it comes round the
+;  ring again it gets its lane from traffic_pattern back.
 ; =====================================================================
 
 CAR_REC_SIZE    equ 4
@@ -1324,7 +1331,9 @@ traffic_update:
         push ax
         push bx
         push cx
+        push dx
         push si
+        push di
         call player_velocity    ; AX = our speed (+ forward, - reverse)
         sub ax, TRAFFIC_SPEED   ; AX = how much closer each car comes
         mov si, traffic
@@ -1334,15 +1343,42 @@ traffic_update:
         cmp bx, RING_BACK
         jge .not_behind
         add bx, RING_LEN        ; far behind us: back to the horizon
+        mov di, si
+        sub di, traffic         ; DI = offset of this car in the table
+        mov dl, [traffic_pattern + di + CAR_LANE]
+        mov [si + CAR_LANE], dl ; its lane from the pattern again
 .not_behind:
         cmp bx, RING_BACK + RING_LEN
         jl .not_too_far
         sub bx, RING_LEN        ; drove away too far: put it behind us
 .not_too_far:
         mov [si + CAR_Z], bx
+        ; ---- is this car catching us up from behind in OUR lane?
+        cmp ax, 0
+        jge .no_overtake        ; we are faster: nobody catches us
+        mov dl, [si + CAR_LANE]
+        cmp dl, [player_lane]
+        jne .no_overtake        ; other lane: it just drives past
+        cmp bx, OVERTAKE_Z
+        jl .no_overtake         ; still far behind us
+        cmp bx, HIT_MIN
+        jge .no_overtake        ; already in front of us
+        ; ---- yes: move it to another lane (it overtakes us)
+        mov dl, LANE_MIDDLE     ; we are on a side lane: use the middle
+        cmp byte [player_lane], LANE_MIDDLE
+        jne .set_lane
+        mov dl, LANE_LEFT       ; we are in the middle: left or right,
+        test cx, 1              ; depending on the car number
+        jz .set_lane
+        mov dl, LANE_RIGHT
+.set_lane:
+        mov [si + CAR_LANE], dl
+.no_overtake:
         add si, CAR_REC_SIZE
         loop .next
+        pop di
         pop si
+        pop dx
         pop cx
         pop bx
         pop ax
