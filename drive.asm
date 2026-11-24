@@ -205,6 +205,10 @@ SC_B            equ 30h             ; scan code of key B
 LAYOUT_SIMPLE   equ 0               ; phases 1-3 screen
 LAYOUT_ORIGINAL equ 1               ; bonus screen (Figures 3 and 4)
 
+SPD_X           equ 112             ; speedometer centre
+SPD_Y           equ 188
+SPD_R           equ 37              ; speedometer radius
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -3407,9 +3411,285 @@ draw_instruments:
 .original:
         call draw_gear_box      ; D / R box, bottom left
         call draw_light_panel   ; the 9 small lights
-        call draw_speed_box     ; (replaced by the speedometer next)
+        call draw_speedometer   ; dial 0..200 km/h
         call draw_fuel_bar      ; (replaced by the fuel gauge later)
         call draw_wheel         ; (replaced by the big wheel later)
+        ret
+
+; ---------------------------------------------------------------------
+; sin256 : AX = angle in degrees  ->  AX = sin(angle) * 256
+;   The table sin_table has sin(0..90 degrees) * 256. Other angles use
+;   the rules  sin(180 - a) = sin(a)  and  sin(a + 180) = -sin(a).
+;   We multiply by 256 so that we can use whole numbers only.
+; cos256 : cos(a) = sin(a + 90)
+; ---------------------------------------------------------------------
+cos256:
+        add ax, 90
+sin256:
+        push bx
+        push dx
+.too_small:
+        cmp ax, 0
+        jge .not_neg
+        add ax, 360             ; bring the angle into 0..359
+        jmp .too_small
+.not_neg:
+        cmp ax, 360
+        jl .in_range
+        sub ax, 360
+        jmp .not_neg
+.in_range:
+        xor dx, dx              ; DX = 0: answer is positive
+        cmp ax, 180
+        jl .upper_half
+        sub ax, 180             ; 180..359: same as 0..179, negative
+        mov dx, 1
+.upper_half:
+        cmp ax, 90
+        jle .first_quarter
+        neg ax
+        add ax, 180             ; 91..179 -> 89..1
+.first_quarter:
+        mov bx, ax
+        shl bx, 1               ; 2 bytes per table entry
+        mov ax, [sin_table + bx]
+        or dx, dx
+        jz .done
+        neg ax
+.done:  pop dx
+        pop bx
+        ret
+
+; ---------------------------------------------------------------------
+; dial_point : a point on a circle around (dial_cx, dial_cy).
+;   In : AX = angle in degrees (0 = right, 90 = up), CX = radius
+;   Out: AX = x, BX = y
+;        x = cx + radius * cos(angle)
+;        y = cy - radius * sin(angle)   (minus: screen y grows down)
+; ---------------------------------------------------------------------
+dial_point:
+        push cx
+        push dx
+        push si
+        mov si, ax              ; SI = angle
+        call cos256
+        imul cx                 ; AX = cos * radius (still * 256)
+        sar ax, 8               ; divide by 256
+        add ax, [dial_cx]
+        push ax
+        mov ax, si
+        call sin256
+        imul cx
+        sar ax, 8
+        mov bx, [dial_cy]
+        sub bx, ax
+        pop ax
+        pop si
+        pop dx
+        pop cx
+        ret
+
+; ---------------------------------------------------------------------
+; draw_line : straight line from (ln_x1, ln_y1) to (ln_x2, ln_y2).
+;   Bresenham's method: step one pixel at a time along the line and
+;   keep an "error" number that says when to also step in the other
+;   direction. Only adding and comparing, no division.
+;   Note: ln_x1 and ln_y1 are changed (they walk along the line).
+; ---------------------------------------------------------------------
+draw_line:
+        push ax
+        push bx
+        push dx
+        mov ax, [ln_x2]
+        sub ax, [ln_x1]
+        mov word [ln_sx], 1     ; step right ...
+        jge .dx_ok
+        neg ax
+        mov word [ln_sx], -1    ; ... or left
+.dx_ok: mov [ln_dx], ax         ; ln_dx = |x2 - x1|
+        mov ax, [ln_y2]
+        sub ax, [ln_y1]
+        mov word [ln_sy], 1     ; step down ...
+        jge .dy_ok
+        neg ax
+        mov word [ln_sy], -1    ; ... or up
+.dy_ok: neg ax
+        mov [ln_dy], ax         ; ln_dy = -|y2 - y1|
+        add ax, [ln_dx]
+        mov [ln_err], ax        ; error = dx + dy
+.plot:  mov ax, [ln_x1]
+        mov dx, [ln_y1]
+        call put_pixel
+        mov ax, [ln_x1]
+        cmp ax, [ln_x2]
+        jne .step
+        mov ax, [ln_y1]
+        cmp ax, [ln_y2]
+        je .done                ; reached the end point
+.step:  mov ax, [ln_err]
+        shl ax, 1               ; AX = 2 * error
+        cmp ax, [ln_dy]
+        jl .no_x
+        mov bx, [ln_dy]
+        add [ln_err], bx
+        mov bx, [ln_sx]
+        add [ln_x1], bx         ; step in x
+.no_x:  cmp ax, [ln_dx]
+        jg .no_y
+        mov bx, [ln_dx]
+        add [ln_err], bx
+        mov bx, [ln_sy]
+        add [ln_y1], bx         ; step in y
+.no_y:  jmp .plot
+.done:  pop dx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; dial_line : line between two points of the dial, same angle AX,
+;   from radius CX (inner) to radius DX (outer).
+; ---------------------------------------------------------------------
+dial_line:
+        push ax
+        push bx
+        push cx
+        push si
+        mov si, ax
+        call dial_point
+        mov [ln_x1], ax
+        mov [ln_y1], bx
+        mov ax, si
+        mov cx, dx
+        call dial_point
+        mov [ln_x2], ax
+        mov [ln_y2], bx
+        call draw_line
+        pop si
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; speed_angle : AX = speed (km/h)  ->  AX = needle angle in degrees.
+;   0 km/h points down-left (225 degrees), 200 km/h down-right
+;   (-45 degrees): 270 degrees for 200 km/h.
+;       angle = 225 - speed * 27 / 20
+; ---------------------------------------------------------------------
+speed_angle:
+        push cx
+        push dx
+        mov cx, 27
+        mul cx
+        mov cx, 20
+        div cx
+        neg ax
+        add ax, 225
+        pop dx
+        pop cx
+        ret
+
+; ---------------------------------------------------------------------
+; draw_speedometer : element 7 of Figure 3. Round dial 0..200 km/h,
+;   ticks every 20 km/h (red from 160), numbers 40 80 120 160, a red
+;   needle and the speed as 3 yellow digits under the centre.
+; ---------------------------------------------------------------------
+draw_speedometer:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov word [dial_cx], SPD_X
+        mov word [dial_cy], SPD_Y
+        ; ---- light rim and dark face
+        mov byte [color], C_LIGHT_GREY
+        mov ax, SPD_X
+        mov bx, SPD_Y
+        mov cx, SPD_R
+        call fill_circle
+        mov byte [color], C_BOX_BG
+        mov cx, SPD_R - 2
+        call fill_circle
+        ; ---- ticks every 20 km/h (long ones every 40 km/h)
+        xor si, si              ; SI = speed of this tick
+.tick:  mov byte [color], C_WHITE
+        cmp si, 160
+        jb .tick_colour
+        mov byte [color], C_RED ; high speeds in red
+.tick_colour:
+        mov cx, SPD_R - 8       ; long tick for 0, 40, 80 ...
+        mov ax, si
+        mov dl, 40
+        div dl                  ; AH = speed mod 40
+        or ah, ah
+        jz .long
+        mov cx, SPD_R - 5       ; short tick for 20, 60, 100 ...
+.long:  mov ax, si
+        call speed_angle
+        mov dx, SPD_R - 3
+        call dial_line
+        add si, 20
+        cmp si, 200
+        jbe .tick
+        ; ---- numbers 40, 80, 120, 160
+        mov byte [color], C_WHITE
+        mov byte [text_scale], 1
+        mov si, 40
+.label: mov ax, si
+        call speed_angle
+        mov cx, SPD_R - 12
+        call dial_point         ; AX, BX = centre of the number
+        push ax
+        push bx
+        mov ax, si
+        mov cx, 1
+        push si
+        call number_to_string   ; SI -> text of the number
+        call string_width       ; AX = its width
+        pop cx                  ; CX = the speed again
+        pop dx                  ; DX = y
+        pop bx                  ; BX = x
+        shr ax, 1
+        sub bx, ax              ; centre the text
+        sub dx, 4
+        call draw_string
+        mov si, cx
+        add si, 40
+        cmp si, 160
+        jbe .label
+        ; ---- needle (2 pixels thick) for the current speed
+        mov byte [color], C_RED
+        mov ax, [speed_kmh]
+        cmp ax, 200
+        jbe .speed_ok
+        mov ax, 200
+.speed_ok:
+        call speed_angle
+        mov cx, 0
+        mov dx, SPD_R - 5
+        call dial_line
+        inc word [dial_cx]
+        call dial_line
+        dec word [dial_cx]
+        mov byte [color], C_HUB
+        mov ax, SPD_X
+        mov bx, SPD_Y
+        mov cx, 2
+        call fill_circle        ; centre cap
+        ; ---- digital speed, 3 yellow digits below the centre
+        mov byte [color], C_YELLOW
+        mov ax, [speed_kmh]
+        mov cx, 3
+        mov bx, SPD_X - 12
+        mov dx, SPD_Y + 4
+        call draw_number
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
         ret
 
 ; ---------------------------------------------------------------------
@@ -3777,3 +4057,26 @@ b_latch         db 0                ; B was held in the last tick
 panel_lights    db C_CAR_BLUE, C_CAR_RED, C_GREEN
                 db C_CAR_BLUE, C_CAR_RED, C_GREEN
                 db C_CAR_RED, C_GREEN, C_CAR_YELLOW
+dial_cx         dw 0                ; centre of the dial being drawn
+dial_cy         dw 0
+ln_x1           dw 0                ; draw_line
+ln_y1           dw 0
+ln_x2           dw 0
+ln_y2           dw 0
+ln_dx           dw 0
+ln_dy           dw 0
+ln_sx           dw 0
+ln_sy           dw 0
+ln_err          dw 0
+; sin(0..90 degrees) * 256
+sin_table:
+        dw 0, 4, 9, 13, 18, 22, 27, 31, 36, 40
+        dw 44, 49, 53, 58, 62, 66, 71, 75, 79, 83
+        dw 88, 92, 96, 100, 104, 108, 112, 116, 120, 124
+        dw 128, 132, 136, 139, 143, 147, 150, 154, 158, 161
+        dw 165, 168, 171, 175, 178, 181, 184, 187, 190, 193
+        dw 196, 199, 202, 204, 207, 210, 212, 215, 217, 219
+        dw 222, 224, 226, 228, 230, 232, 234, 236, 237, 239
+        dw 241, 242, 243, 245, 246, 247, 248, 249, 250, 251
+        dw 252, 253, 254, 254, 255, 255, 255, 256, 256, 256
+        dw 256
