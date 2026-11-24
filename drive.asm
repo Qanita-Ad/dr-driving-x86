@@ -76,7 +76,9 @@ C_SENSOR_GRN    equ 29              ; sensor green
 C_PANEL         equ 30              ; message boxes / banner
 C_BROWN         equ 31              ; lane guide panel
 C_ARROW_DIM     equ 32              ; lane guide arrow (not our lane)
-PALETTE_COUNT   equ 33              ; how many colours we define
+C_GREEN_DIM     equ 33              ; indicator switched off
+C_HAZARD        equ 34              ; hazard triangle (off)
+PALETTE_COUNT   equ 35              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -218,6 +220,12 @@ FG_R            equ 22              ; fuel gauge radius
 LG_X_HIGHWAY    equ 205             ; lane guide panel, highway
 LG_X_PARKING    equ 238             ; ... parking (right of the banner)
 LG_Y            equ 2
+
+IND_TIME        equ TICKS_PER_SEC   ; indicator flashes for 1 second
+IND_L_X         equ 156             ; left indicator centre
+IND_R_X         equ 192             ; right indicator centre
+IND_Y           equ 179
+HAZ_X           equ 174             ; hazard triangle centre
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -2081,6 +2089,14 @@ player_controls:
 player_lanes:
         push ax
         push bx
+        ; ---- indicator timers count down
+        cmp word [ind_left], 0
+        je .il_ok
+        dec word [ind_left]
+.il_ok: cmp word [ind_right], 0
+        je .ir_ok
+        dec word [ind_right]
+.ir_ok:
         ; ---- Left arrow
         mov al, [key_down + SC_LEFT]
         cmp al, 1
@@ -2090,6 +2106,7 @@ player_lanes:
         cmp byte [player_lane], LANE_LEFT
         je .left_done           ; already in the leftmost lane
         dec byte [player_lane]
+        mov word [ind_left], IND_TIME   ; left indicator flashes
 .left_done:
         mov [left_latch], al
         ; ---- Right arrow
@@ -2101,6 +2118,7 @@ player_lanes:
         cmp byte [player_lane], LANE_RIGHT
         je .right_done          ; already in the rightmost lane
         inc byte [player_lane]
+        mov word [ind_right], IND_TIME  ; right indicator flashes
 .right_done:
         mov [right_latch], al
         ; ---- slide the camera towards the lane we are in
@@ -2334,6 +2352,8 @@ highway_start:
         mov byte [left_latch], 1    ; ignore keys that are already held
         mov byte [right_latch], 1
         call traffic_start
+        mov word [ind_left], 0
+        mov word [ind_right], 0
         mov byte [gear], GEAR_D
         mov word [crash_timer], 0
         mov word [fuel], FUEL_MAX
@@ -2701,6 +2721,8 @@ parking_start:
         mov word [cam_x16], 0
         mov byte [left_latch], 1
         mov byte [right_latch], 1
+        mov word [ind_left], 0
+        mov word [ind_right], 0
         mov word [speed_x16], 0
         mov word [speed_kmh], 0
         mov byte [gear], GEAR_D
@@ -3423,6 +3445,7 @@ draw_instruments:
         call draw_light_panel   ; the 9 small lights
         call draw_lane_guide    ; arrows at the top
         call draw_speedometer   ; dial 0..200 km/h
+        call draw_indicators    ; green arrows and hazard
         call draw_fuel_gauge    ; dial E..F
         call draw_wheel         ; (replaced by the big wheel later)
         ret
@@ -3896,6 +3919,133 @@ draw_lane_guide:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_indicators : element 8 of Figure 3.
+;   Left and right green arrows: they flash (on/off every 16 ticks)
+;   for one second after we move one lane towards that side.
+;   The red hazard triangle in the middle stays off.
+; ---------------------------------------------------------------------
+draw_indicators:
+        push ax
+        push bx
+        push cx
+        push dx
+        ; ---- left arrow
+        mov byte [color], C_GREEN_DIM
+        mov ax, [ind_left]
+        test ax, 16
+        jz .left_colour         ; off half of the flash (or not moving)
+        mov byte [color], C_GREEN
+.left_colour:
+        mov ax, IND_L_X
+        mov dx, -1              ; DX = -1: arrow points left
+        call .arrow
+        ; ---- right arrow
+        mov byte [color], C_GREEN_DIM
+        mov ax, [ind_right]
+        test ax, 16
+        jz .right_colour
+        mov byte [color], C_GREEN
+.right_colour:
+        mov ax, IND_R_X
+        mov dx, 1               ; DX = +1: arrow points right
+        call .arrow
+        ; ---- hazard triangle: two outlines, switched off
+        mov byte [color], C_HAZARD
+        mov bx, 7               ; outer triangle, size 7
+        call .triangle
+        mov bx, 4               ; inner triangle, size 4
+        call .triangle
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .arrow : AX = centre x, DX = direction (-1 left, +1 right).
+;   Head: 11 rows (-5..+5). Row r is 6 - |r| pixels long, so the
+;   rows make a triangle with its tip 6 pixels from the centre.
+;   Tail: a 7 x 5 rectangle on the other side of the centre.
+.arrow:
+        push si
+        push di
+        mov si, ax              ; SI = centre x
+        mov di, dx              ; DI = direction (IMUL changes DX)
+        mov cx, -5              ; CX = row offset -5..+5
+.head_row:
+        mov ax, cx
+        cmp ax, 0
+        jge .abs_ok
+        neg ax                  ; AX = |row offset|
+.abs_ok:
+        neg ax
+        add ax, 6               ; AX = 6 - |row|
+        imul di                 ; negative for the left arrow
+        add ax, si              ; x at the tip side of this row
+        mov bx, si              ; x at the base of the head
+        mov dx, IND_Y
+        add dx, cx
+        call hline
+        inc cx
+        cmp cx, 5
+        jle .head_row
+        ; tail
+        mov ax, si
+        cmp di, 0
+        jl .tail_left
+        sub ax, 6               ; right arrow: tail on the left side
+.tail_left:
+        mov bx, IND_Y - 2
+        mov cx, 7
+        mov dx, 5
+        call fill_rect
+        pop di
+        pop si
+        ret
+
+; .triangle : outline of a triangle around (HAZ_X, IND_Y), size BX.
+.triangle:
+        push ax
+        mov ax, HAZ_X
+        mov [ln_x1], ax
+        mov ax, IND_Y
+        sub ax, bx
+        mov [ln_y1], ax         ; top corner
+        mov ax, HAZ_X
+        sub ax, bx
+        mov [ln_x2], ax
+        mov ax, IND_Y
+        add ax, bx
+        mov [ln_y2], ax         ; bottom-left corner
+        call draw_line
+        mov ax, HAZ_X
+        sub ax, bx
+        mov [ln_x1], ax
+        mov ax, IND_Y
+        add ax, bx
+        mov [ln_y1], ax
+        mov ax, HAZ_X
+        add ax, bx
+        mov [ln_x2], ax
+        mov ax, IND_Y
+        add ax, bx
+        mov [ln_y2], ax         ; bottom-right corner
+        call draw_line
+        mov ax, HAZ_X
+        add ax, bx
+        mov [ln_x1], ax
+        mov ax, IND_Y
+        add ax, bx
+        mov [ln_y1], ax
+        mov ax, HAZ_X
+        mov [ln_x2], ax
+        mov ax, IND_Y
+        sub ax, bx
+        mov [ln_y2], ax         ; back to the top
+        call draw_line
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_gear_box : rounded box with a ring and a big D (green) or
 ;   R (red), bottom left of the dashboard.
 ; ---------------------------------------------------------------------
@@ -4137,6 +4287,8 @@ palette:
         db  6,  6,  8           ; 30 C_PANEL
         db 12,  8,  5           ; 31 C_BROWN
         db 27, 24, 21           ; 32 C_ARROW_DIM
+        db  5, 17, 10           ; 33 C_GREEN_DIM
+        db 32,  8,  8           ; 34 C_HAZARD
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
@@ -4288,3 +4440,5 @@ sin_table:
 lg_x            dw 0                ; draw_lane_guide
 lg_col          dw 0
 lg_arrow        db 0
+ind_left        dw 0                ; ticks the left indicator flashes
+ind_right       dw 0                ; ticks the right indicator flashes
