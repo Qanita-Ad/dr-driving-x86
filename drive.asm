@@ -194,6 +194,10 @@ SENSOR_Y        equ 122             ; row of the "SENSOR 0.8 m" text
 SEG_X           equ 121             ; left x of the 8 lights
 SEG_STEP        equ 10              ; 8 pixels light + 2 pixels gap
 
+MSG_PARKED      equ 4               ; parked in the bay
+PARK_HOLD       equ TICKS_PER_SEC / 2   ; must stay parked 0.5 s
+TOUCH_GAP       equ 40              ; closer than 40 units = touching
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2412,6 +2416,12 @@ draw_end_message:
         mov byte [color], C_RED
         cmp byte [end_msg], MSG_TIME
         je .write
+        mov si, txt_park_1
+        mov di, txt_park_2
+        mov byte [color], C_GREEN
+        cmp byte [end_msg], MSG_PARKED
+        je .write
+        mov byte [color], C_RED
         mov si, txt_nofuel_1
         mov di, txt_nofuel_2
 .write: mov byte [text_scale], 2
@@ -2648,6 +2658,7 @@ parking_start:
         mov word [crash_timer], 0
         mov byte [hw_state], STATE_PLAYING
         mov word [tick_count], 0
+        mov word [park_hold], 0
         call park_sensor        ; correct reading from the first frame
         ret
 
@@ -2660,6 +2671,11 @@ parking_update:
         call go_menu            ; ESC: leave the level
         ret
 .no_esc:
+        cmp byte [hw_state], STATE_ENDED
+        jne .playing
+        call end_screen_keys    ; level over: wait for ENTER
+        ret
+.playing:
         mov al, [player_lane]
         mov [old_lane], al
         call player_controls    ; Up, Space, Down (same as highway)
@@ -2692,6 +2708,7 @@ parking_update:
         call use_fuel
         call count_down_time
         call park_sensor        ; measure the nearest gap
+        call check_park_end     ; parked? time up? no fuel?
         ret
 
 ; ---------------------------------------------------------------------
@@ -3035,6 +3052,70 @@ draw_sensor:
         ret
 
 ; ---------------------------------------------------------------------
+; check_park_end : parked, time up or no fuel?
+;   We are parked when ALL of these are true for half a second:
+;     1. we are in the middle lane (the lane of the bay),
+;     2. the speed is exactly 0,
+;     3. the WHOLE car is inside the bay:
+;          back  = park_z - CAR_BACK   >= BAY_START   and
+;          front = park_z + CAR_FRONT  <= BAY_END,
+;     4. nothing touches us: nearest object >= TOUCH_GAP away.
+;   Just touching the bay is not enough (rule 3), and rolling
+;   through the bay is not enough (rules 2 and the half second).
+; ---------------------------------------------------------------------
+check_park_end:
+        push ax
+        push cx
+        push dx
+        cmp byte [player_lane], LANE_MIDDLE
+        jne .not_parked
+        cmp word [speed_x16], 0
+        jne .not_parked
+        mov ax, [park_z]
+        sub ax, CAR_BACK
+        cmp ax, BAY_START
+        jl .not_parked          ; back of the car outside the bay
+        mov ax, [park_z]
+        add ax, CAR_FRONT
+        cmp ax, BAY_END
+        jg .not_parked          ; front of the car outside the bay
+        cmp word [sensor_gap], TOUCH_GAP
+        jl .not_parked          ; touching a car
+        inc word [park_hold]
+        cmp word [park_hold], PARK_HOLD
+        jb .check_time
+        ; ---- success: +10 points for every second left
+        mov ax, [time_left]
+        xor dx, dx
+        mov cx, TICKS_PER_SEC
+        div cx                  ; AX = seconds left
+        mov cx, 10
+        mul cx
+        add [score], ax
+        mov al, MSG_PARKED
+        jmp .end_level
+.not_parked:
+        mov word [park_hold], 0
+.check_time:
+        cmp word [time_left], 0
+        jne .time_ok
+        mov al, MSG_TIME
+        jmp .end_level
+.time_ok:
+        cmp word [fuel], 0
+        jne .done
+        mov al, MSG_FUEL
+.end_level:
+        mov [end_msg], al
+        mov byte [hw_state], STATE_ENDED
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+.done:  pop dx
+        pop cx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_parking_frame : the whole parking picture (painter's method).
 ; ---------------------------------------------------------------------
 draw_parking_frame:
@@ -3052,6 +3133,7 @@ draw_parking_frame:
         call draw_score_only
         call draw_banner        ; "PARKING - LEVEL 2"
         call draw_crash_message
+        call draw_end_message   ; only when the level has ended
         ret
 
 ; ---------------------------------------------------------------------
@@ -3359,6 +3441,8 @@ txt_timeup_2    db 'The time has run out.', 0
 txt_nofuel_1    db 'NO FUEL!', 0
 txt_nofuel_2    db 'The fuel tank is empty.', 0
 txt_again       db 'ENTER = back to menu', 0
+txt_park_1      db 'PARKED!', 0
+txt_park_2      db 'Inside the bay. Well done!', 0
 txt_title       db 'DR. DRIVING LITE', 0
 txt_menu_1      db '1   HIGHWAY    (Level 1)', 0
 txt_menu_2      db '2   PARKING    (Level 2)', 0
@@ -3501,6 +3585,7 @@ park_objects:
 obj_drawn       times PARK_OBJ_COUNT db 0
 old_z           dw 0                ; park_z before the move
 old_lane        db 0                ; lane before the lane change
+park_hold       dw 0                ; ticks we have stood in the bay
 cone_x          dw 0                ; draw_cone
 cone_hw         dw 0
 cone_h          dw 0
