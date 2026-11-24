@@ -87,7 +87,9 @@ C_BLD_BASE      equ 40              ; brown shop fronts
 C_BLD_WIN       equ 41              ; windows
 C_BUSH          equ 42              ; round trees
 C_FENCE         equ 43              ; fence behind the lot
-PALETTE_COUNT   equ 44              ; how many colours we define
+C_SHADOW        equ 44              ; shadow under a car
+C_BUMPER        equ 45              ; dark grey bumper
+PALETTE_COUNT   equ 46              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -1120,14 +1122,16 @@ draw_road:
 ;  cars.asm  -  Drawing a car (seen from behind) in perspective
 ; ---------------------------------------------------------------------
 ;  Used for the highway traffic and for the parked cars.
-;  A car is just a few rectangles:
-;      +-------------+   <- body (car colour)
-;      |  +-------+  |   <- rear window (dark blue)
-;      |  +-------+  |
-;      |[]         []|   <- tail lights (red)
-;      +=============+   <- bumper (dark)
-;  The size of every part is a fraction of the lane width on the row
-;  where the car stands, so far cars are small and near cars are big.
+;  The car is measured in 1/16 of its width (columns) and 1/16 of its
+;  height (rows), so every part grows with the car:
+;          ___________          rows  0..6  : roof with rear window
+;         /  window   \                       (narrower at the top)
+;        |[==]  ___ [==]|       rows  6..14 : body, tail lights,
+;        |     |___|    |                     number plate, bumper
+;        '--OO------OO--'       rows 13..16 : wheels, shadow
+;  The size of the car is 3/4 of the lane width on the row where it
+;  stands, so far cars are small and near cars are big. Very small
+;  (far) cars are drawn as a simple box.
 ; =====================================================================
 
 ; ---------------------------------------------------------------------
@@ -1170,10 +1174,10 @@ draw_car:
         jge .w_ok
         mov ax, 3
 .w_ok:  mov [car_w], ax
-        ; height = 5/8 of the width, at least 2 pixels
-        mov bx, 5
+        ; height = 13/16 of the width, at least 2 pixels
+        mov bx, 13
         mul bx
-        shr ax, 3
+        shr ax, 4
         cmp ax, 2
         jge .h_ok
         mov ax, 2
@@ -1188,8 +1192,9 @@ draw_car:
         sub ax, [car_h]
         inc ax
         mov [car_top], ax
-
-        ; ---- body
+        cmp word [car_w], 10
+        jae .detailed
+        ; ---- far away: a box with two red dots
         mov al, [car_colour]
         mov [color], al
         mov ax, [car_left]
@@ -1197,78 +1202,97 @@ draw_car:
         mov cx, [car_w]
         mov dx, [car_h]
         call fill_rect
-
-        ; ---- rear window: inset by width/8, from h/6 down to h/2
-        mov byte [color], C_WINDOW
-        mov si, [car_w]
-        shr si, 3               ; SI = width / 8
-        mov ax, [car_h]
-        xor dx, dx
-        mov bx, 6
-        div bx
-        mov di, ax              ; DI = height / 6
-        mov ax, [car_left]
-        add ax, si
-        mov bx, [car_top]
-        add bx, di
-        mov cx, [car_w]
-        sub cx, si
-        sub cx, si
-        mov dx, [car_h]
-        shr dx, 1
-        sub dx, di              ; window height = h/2 - h/6
-        jg .win_ok
-        mov dx, 1
-.win_ok:
-        call fill_rect
-
-        ; ---- tail lights: size w/6 x h/5, placed at 3/5 of the height
         mov byte [color], C_TAIL
-        mov ax, [car_w]
-        xor dx, dx
-        mov bx, 6
-        div bx
-        cmp ax, 1
-        jge .lw_ok
-        mov ax, 1
-.lw_ok: mov si, ax              ; SI = light width
-        mov ax, [car_h]
-        xor dx, dx
-        mov bx, 5
-        div bx
-        cmp ax, 1
-        jge .lh_ok
-        mov ax, 1
-.lh_ok: mov di, ax              ; DI = light height
-        mov ax, [car_h]
-        mov bx, 3
-        mul bx
-        mov bx, 5
-        div bx                  ; AX = 3h/5
-        add ax, [car_top]
-        mov bx, ax              ; BX = light top row
         mov ax, [car_left]
-        mov cx, si
-        mov dx, di
-        call fill_rect          ; left light
-        mov ax, [car_left]
+        mov dx, [car_bottom]
+        dec dx
+        call put_pixel
         add ax, [car_w]
-        sub ax, si
-        call fill_rect          ; right light
-
-        ; ---- dark bumper on the bottom row(s)
-        mov byte [color], C_WHEEL
-        mov dx, [car_h]
-        shr dx, 3               ; bumper height = h/8
-        cmp dx, 1
-        jge .b_ok
-        mov dx, 1
-.b_ok:  mov bx, [car_bottom]
-        sub bx, dx
-        inc bx
+        dec ax
+        call put_pixel
+        jmp .done
+.detailed:
+        ; ---- shadow on the road under the car
+        mov byte [color], C_SHADOW
         mov ax, [car_left]
+        dec ax
+        mov bx, [car_bottom]
+        dec bx
         mov cx, [car_w]
+        add cx, 2
+        mov dx, 3
         call fill_rect
+        ; ---- wheels (body covers their top)
+        mov byte [color], C_WHEEL
+        mov ax, 0401h           ; columns 1..4
+        mov bx, 100Dh           ; rows 13..16
+        call .part
+        mov ax, 0F0Ch           ; columns 12..15
+        call .part
+        ; ---- body
+        mov al, [car_colour]
+        mov [color], al
+        mov ax, 1000h           ; columns 0..16
+        mov bx, 0E06h           ; rows 6..14
+        call .part
+        ; ---- roof: trapezoid, columns 3..13 at the top, 1..15 lower
+        mov ax, 3
+        call .col_at
+        mov [tz_xl1], ax
+        mov ax, 13
+        call .col_at
+        mov [tz_xr1], ax
+        mov ax, 1
+        call .col_at
+        mov [tz_xl2], ax
+        mov ax, 15
+        call .col_at
+        mov [tz_xr2], ax
+        xor ax, ax
+        call .row_at
+        mov [tz_y1], ax
+        mov ax, 6
+        call .row_at
+        mov [tz_y2], ax
+        call fill_trapezoid
+        ; ---- rear window inside the roof
+        mov byte [color], C_WINDOW
+        mov ax, 4
+        call .col_at
+        mov [tz_xl1], ax
+        mov ax, 12
+        call .col_at
+        mov [tz_xr1], ax
+        mov ax, 2
+        call .col_at
+        mov [tz_xl2], ax
+        mov ax, 14
+        call .col_at
+        mov [tz_xr2], ax
+        mov ax, 1
+        call .row_at
+        mov [tz_y1], ax
+        mov ax, 6
+        call .row_at
+        mov [tz_y2], ax
+        call fill_trapezoid
+        ; ---- dark bumper
+        mov byte [color], C_BUMPER
+        mov ax, 1000h           ; columns 0..16
+        mov bx, 0E0Ch           ; rows 12..14
+        call .part
+        ; ---- tail lights
+        mov byte [color], C_TAIL
+        mov ax, 0401h           ; columns 1..4
+        mov bx, 0907h           ; rows 7..9
+        call .part
+        mov ax, 0F0Ch           ; columns 12..15
+        call .part
+        ; ---- white number plate in the middle
+        mov byte [color], C_WHITE
+        mov ax, 0A06h           ; columns 6..10
+        mov bx, 0C09h           ; rows 9..12
+        call .part
 .done:
         pop di
         pop si
@@ -1276,6 +1300,71 @@ draw_car:
         pop cx
         pop bx
         pop ax
+        ret
+
+; .part : one rectangle of the car, given in 1/16 steps.
+;   In: AL = first column, AH = last column (0..16)
+;       BL = first row,    BH = last row    (0..16)
+.part:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov si, ax
+        mov di, bx
+        mov ax, si
+        xor ah, ah
+        call .col_at
+        mov cx, ax              ; CX = left x
+        mov ax, si
+        mov al, ah
+        xor ah, ah
+        call .col_at
+        sub ax, cx              ; AX = width
+        jg .w_pos
+        mov ax, 1
+.w_pos: push ax
+        mov ax, di
+        xor ah, ah
+        call .row_at
+        mov bx, ax              ; BX = top y
+        mov ax, di
+        mov al, ah
+        xor ah, ah
+        call .row_at
+        sub ax, bx
+        jg .h_pos
+        mov ax, 1
+.h_pos: mov dx, ax              ; DX = height
+        pop ax
+        xchg ax, cx             ; AX = left x, CX = width
+        call fill_rect
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .col_at : AX = n (0..16) -> AX = car_left + car_w * n / 16
+.col_at:
+        push dx
+        mul word [car_w]
+        shr ax, 4
+        add ax, [car_left]
+        pop dx
+        ret
+
+; .row_at : AX = n (0..16) -> AX = car_top + car_h * n / 16
+.row_at:
+        push dx
+        mul word [car_h]
+        shr ax, 4
+        add ax, [car_top]
+        pop dx
         ret
 
 ; =====================================================================
@@ -4887,6 +4976,8 @@ palette:
         db 24, 29, 37           ; 41 C_BLD_WIN
         db 24, 37, 26           ; 42 C_BUSH
         db 22, 25, 24           ; 43 C_FENCE
+        db  8,  8,  9           ; 44 C_SHADOW
+        db 14, 14, 15           ; 45 C_BUMPER
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
