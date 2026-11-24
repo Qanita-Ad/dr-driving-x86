@@ -85,7 +85,9 @@ C_BLD_3         equ 38
 C_BLD_4         equ 39
 C_BLD_BASE      equ 40              ; brown shop fronts
 C_BLD_WIN       equ 41              ; windows
-PALETTE_COUNT   equ 42              ; how many colours we define
+C_BUSH          equ 42              ; round trees
+C_FENCE         equ 43              ; fence behind the lot
+PALETTE_COUNT   equ 44              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -3209,6 +3211,7 @@ check_park_end:
 ; ---------------------------------------------------------------------
 draw_parking_frame:
         call draw_lot           ; sky, trees, lot floor, lane lines
+        call draw_park_scenery  ; round trees and fence (original)
         call draw_bay           ; green bay with the letter P
         call draw_park_objects  ; parked cars and cones
         call draw_sensor        ; distance to the nearest object
@@ -4364,6 +4367,57 @@ draw_city:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_park_scenery : original layout only (Figure 4).
+;   A row of round trees and a fence between the trees and the lot.
+; ---------------------------------------------------------------------
+draw_park_scenery:
+        cmp byte [layout], LAYOUT_ORIGINAL
+        je .draw
+        ret
+.draw:  push ax
+        push bx
+        push cx
+        push dx
+        ; ---- round trees: a circle every 18 pixels, two sizes
+        mov byte [color], C_BUSH
+        mov ax, 6
+        mov dx, 0               ; DX counts the trees (big / small)
+.tree:  mov bx, TREES_TOP + 7
+        mov cx, 11              ; big tree
+        test dx, 1
+        jz .size_ok
+        mov bx, TREES_TOP + 9
+        mov cx, 9               ; small tree
+.size_ok:
+        call fill_circle
+        inc dx
+        add ax, 18
+        cmp ax, SCREEN_W + 10
+        jb .tree
+        ; ---- fence: two rails and a post every 8 pixels
+        mov byte [color], C_FENCE
+        xor ax, ax
+        mov bx, HORIZON - 9
+        mov cx, SCREEN_W
+        mov dx, 1
+        call fill_rect          ; top rail
+        mov bx, HORIZON - 4
+        call fill_rect          ; lower rail
+        xor ax, ax
+.post:  mov bx, HORIZON - 10
+        mov cx, 1
+        mov dx, 9
+        call fill_rect
+        add ax, 8
+        cmp ax, SCREEN_W
+        jb .post
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_gear_box : rounded box with a ring and a big D (green) or
 ;   R (red), bottom left of the dashboard.
 ; ---------------------------------------------------------------------
@@ -4614,6 +4668,8 @@ palette:
         db 50, 51, 54           ; 39 C_BLD_4
         db 27, 17, 14           ; 40 C_BLD_BASE
         db 24, 29, 37           ; 41 C_BLD_WIN
+        db 24, 37, 26           ; 42 C_BUSH
+        db 22, 25, 24           ; 43 C_FENCE
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
