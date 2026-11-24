@@ -200,6 +200,11 @@ TOUCH_GAP       equ 40              ; closer than 40 units = touching
 
 END_WAIT        equ 8 * TICKS_PER_SEC   ; end message stays 8 seconds
 
+; ---------------- Bonus: original Dr. Driving layout ------------------
+SC_B            equ 30h             ; scan code of key B
+LAYOUT_SIMPLE   equ 0               ; phases 1-3 screen
+LAYOUT_ORIGINAL equ 1               ; bonus screen (Figures 3 and 4)
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2478,10 +2483,7 @@ draw_highway_frame:
         call draw_traffic       ; element 4: traffic cars
         call draw_bonnet        ; element 5: orange bonnet
         call draw_dashboard
-        call draw_speed_box     ; element 6
-        call draw_gear          ; D or R
-        call draw_fuel_bar      ; element 7
-        call draw_wheel         ; element 8
+        call draw_instruments   ; elements 6, 7, 8 (depends on layout)
         call draw_time_bar      ; element 1
         call draw_dist_score    ; element 2
         call draw_crash_message
@@ -2561,6 +2563,15 @@ menu_update:
         mov byte [quit_flag], 1
 .esc_done:
         mov [esc_latch], al
+        ; ---- key B: switch the layout (once per press)
+        mov al, [key_down + SC_B]
+        cmp al, 1
+        jne .b_done
+        cmp byte [b_latch], 1
+        je .b_done
+        xor byte [layout], 1    ; 0 -> 1 and 1 -> 0
+.b_done:
+        mov [b_latch], al
         ; ---- key 1: highway
         cmp byte [key_down + SC_1], 1
         jne .no_1
@@ -2622,22 +2633,32 @@ draw_menu:
         mov dx, MENU_Y + 10
         call draw_string
         mov si, txt_menu_2
-        mov dx, MENU_Y + 24
+        mov dx, MENU_Y + 22
+        call draw_string
+        mov si, txt_menu_b      ; "B   LAYOUT: " + SIMPLE / ORIGINAL
+        mov dx, MENU_Y + 34
+        call draw_string_adv
+        mov si, txt_simple
+        cmp byte [layout], LAYOUT_ORIGINAL
+        jne .layout_name
+        mov si, txt_original
+.layout_name:
         call draw_string
         mov byte [color], C_LIGHT_GREY
+        mov bx, MENU_X + 16
         mov si, txt_menu_esc
-        mov dx, MENU_Y + 38
+        mov dx, MENU_Y + 46
         call draw_string
         ; ---- controls
         mov bx, MENU_X + 12
         mov si, txt_help_1
-        mov dx, MENU_Y + 56
+        mov dx, MENU_Y + 60
         call draw_string
         mov si, txt_help_2
-        mov dx, MENU_Y + 68
+        mov dx, MENU_Y + 72
         call draw_string
         mov si, txt_help_3
-        mov dx, MENU_Y + 80
+        mov dx, MENU_Y + 84
         call draw_string
         pop si
         pop dx
@@ -3143,10 +3164,7 @@ draw_parking_frame:
         call draw_sensor        ; distance to the nearest object
         call draw_bonnet
         call draw_dashboard
-        call draw_speed_box
-        call draw_gear
-        call draw_fuel_bar
-        call draw_wheel
+        call draw_instruments   ; speed, gear, fuel, wheel (layout)
         call draw_time_bar
         call draw_score_only
         call draw_banner        ; "PARKING - LEVEL 2"
@@ -3364,6 +3382,133 @@ draw_banner:
         ret
 
 ; =====================================================================
+;  bonus  -  The original Dr. Driving layout (Figures 3 and 4)
+; ---------------------------------------------------------------------
+;  In the menu, key B switches between the simple layout (phases 1-3)
+;  and the original layout. The GAME RULES ARE EXACTLY THE SAME: only
+;  some parts of the screen are drawn in a different way.
+;     simple   : speed box, D/R letter, fuel bar, simple wheel
+;     original : gear box, light panel, speedometer dial, indicators,
+;                hazard, fuel gauge dial, lane guide arrows, big wheel,
+;                city street (highway) and trees + fence (parking)
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; draw_instruments : the dashboard parts of the chosen layout.
+; ---------------------------------------------------------------------
+draw_instruments:
+        cmp byte [layout], LAYOUT_ORIGINAL
+        je .original
+        call draw_speed_box     ; element 6
+        call draw_gear          ; D or R
+        call draw_fuel_bar      ; element 7
+        call draw_wheel         ; element 8
+        ret
+.original:
+        call draw_gear_box      ; D / R box, bottom left
+        call draw_light_panel   ; the 9 small lights
+        call draw_speed_box     ; (replaced by the speedometer next)
+        call draw_fuel_bar      ; (replaced by the fuel gauge later)
+        call draw_wheel         ; (replaced by the big wheel later)
+        ret
+
+; ---------------------------------------------------------------------
+; draw_gear_box : rounded box with a ring and a big D (green) or
+;   R (red), bottom left of the dashboard.
+; ---------------------------------------------------------------------
+GBOX_X          equ 7
+GBOX_Y          equ 176
+GBOX_W          equ 24
+GBOX_H          equ 21
+
+draw_gear_box:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov byte [color], C_LIGHT_GREY
+        mov ax, GBOX_X
+        mov bx, GBOX_Y
+        mov cx, GBOX_W
+        mov dx, GBOX_H
+        call fill_rect
+        mov byte [color], C_PANEL
+        mov ax, GBOX_X + 1
+        mov bx, GBOX_Y + 1
+        mov cx, GBOX_W - 2
+        mov dx, GBOX_H - 2
+        call fill_rect
+        ; ring around the letter
+        mov byte [color], C_LIGHT_GREY
+        mov ax, GBOX_X + GBOX_W / 2
+        mov bx, GBOX_Y + GBOX_H / 2
+        mov cx, 8
+        mov dx, 7
+        call fill_ring
+        ; the letter: D in green, R in red
+        mov byte [color], C_GREEN
+        cmp byte [gear], GEAR_R
+        jne .colour_ok
+        mov byte [color], C_RED
+.colour_ok:
+        mov byte [text_scale], 1
+        mov al, [gear]
+        mov bx, GBOX_X + GBOX_W / 2 - 4
+        mov dx, GBOX_Y + GBOX_H / 2 - 4
+        call draw_char
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_light_panel : small box with 3 x 3 coloured lights (decoration,
+;   like the original game). Colours come from the table panel_lights.
+; ---------------------------------------------------------------------
+LPANEL_X        equ 35
+LPANEL_Y        equ 174
+
+draw_light_panel:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [color], C_LIGHT_GREY
+        mov ax, LPANEL_X
+        mov bx, LPANEL_Y
+        mov cx, 28
+        mov dx, 24
+        call fill_rect
+        mov byte [color], C_PANEL
+        mov ax, LPANEL_X + 1
+        mov bx, LPANEL_Y + 1
+        mov cx, 26
+        mov dx, 22
+        call fill_rect
+        mov si, panel_lights    ; 9 colours, row by row
+        mov bx, LPANEL_Y + 5    ; BX = y of the first row
+.row:   mov ax, LPANEL_X + 6    ; AX = x of the first light
+.light: mov dl, [si]
+        mov [color], dl
+        inc si
+        mov cx, 2
+        call fill_circle
+        add ax, 8
+        cmp ax, LPANEL_X + 6 + 3 * 8
+        jb .light
+        add bx, 7
+        cmp bx, LPANEL_Y + 5 + 3 * 7
+        jb .row
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
 ;  main program
 ; ---------------------------------------------------------------------
 ;  The game loop:  update the game  ->  draw a frame  ->  show it,
@@ -3465,6 +3610,9 @@ txt_title       db 'DR. DRIVING LITE', 0
 txt_menu_1      db '1   HIGHWAY    (Level 1)', 0
 txt_menu_2      db '2   PARKING    (Level 2)', 0
 txt_menu_esc    db 'ESC QUIT', 0
+txt_menu_b      db 'B   LAYOUT: ', 0
+txt_simple      db 'SIMPLE', 0
+txt_original    db 'ORIGINAL', 0
 txt_help_1      db 'UP = gas     SPACE = brake', 0
 txt_help_2      db 'LEFT / RIGHT = change lane', 0
 txt_help_3      db 'DOWN = reverse (at 0 km/h)', 0
@@ -3622,3 +3770,10 @@ sensor_txt      db 'SENSOR 0.0 m', 0
 seg_colours     db C_SENSOR_GRN, C_SENSOR_GRN, C_SENSOR_GRN
                 db C_SENSOR_YEL, C_SENSOR_YEL
                 db C_RED, C_RED, C_RED
+
+; ---------------- Bonus layout ----------------------------------------
+layout          db LAYOUT_SIMPLE    ; which screen layout is used
+b_latch         db 0                ; B was held in the last tick
+panel_lights    db C_CAR_BLUE, C_CAR_RED, C_GREEN
+                db C_CAR_BLUE, C_CAR_RED, C_GREEN
+                db C_CAR_RED, C_GREEN, C_CAR_YELLOW
