@@ -176,6 +176,19 @@ PARK_MAX_SPEED  equ 25              ; km/h top speed in the parking lot
 PARK_Z_MIN      equ 0               ; back wall of the lot
 PARK_Z_MAX      equ 12000           ; far end of the lot
 
+CAR_FRONT       equ 1100            ; our car reaches this far ahead
+CAR_BACK        equ 500             ; ... and this far behind the driver
+; one parking-lot object = 8 bytes:
+OBJ_ZS          equ 0               ; word: where it starts (along lot)
+OBJ_ZE          equ 2               ; word: where it ends
+OBJ_LANE        equ 4               ; byte: lane 0, 1 or 2
+OBJ_KIND        equ 5               ; byte: KIND_CAR or KIND_CONE
+OBJ_COLOUR      equ 6               ; byte: colour of a car
+OBJ_X16         equ 7               ; byte: sideways place to draw it
+OBJ_SIZE        equ 8
+KIND_CAR        equ 0
+KIND_CONE       equ 1
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -2641,9 +2654,35 @@ parking_update:
         call go_menu            ; ESC: leave the level
         ret
 .no_esc:
+        mov al, [player_lane]
+        mov [old_lane], al
         call player_controls    ; Up, Space, Down (same as highway)
         call player_lanes       ; Left, Right (same as highway)
-        call park_move          ; move along the lot
+        ; ---- changed into a lane where something is standing?
+        mov ax, [park_z]
+        mov bl, [player_lane]
+        call park_overlap
+        jnc .lane_ok
+        mov al, [old_lane]
+        mov [player_lane], al   ; stay in the old lane
+        call park_crash
+.lane_ok:
+        ; ---- move, and undo the move if we drove into something
+        mov ax, [park_z]
+        mov [old_z], ax
+        call park_move
+        mov ax, [park_z]
+        mov bl, [player_lane]
+        call park_overlap
+        jnc .move_ok
+        mov ax, [old_z]
+        mov [park_z], ax        ; back to where we were
+        call park_crash
+.move_ok:
+        cmp word [crash_timer], 0
+        je .timer_ok
+        dec word [crash_timer]
+.timer_ok:
         call use_fuel
         call count_down_time
         ret
@@ -2675,11 +2714,209 @@ park_move:
         ret
 
 ; ---------------------------------------------------------------------
+; park_overlap : would our car touch something?
+;   In : AX = park_z to test, BL = lane to test
+;   Out: carry flag = 1 if it overlaps a car or a cone.
+;   Our car covers  park_z - CAR_BACK  ..  park_z + CAR_FRONT.
+;   Two pieces overlap when each one starts before the other ends.
+; ---------------------------------------------------------------------
+park_overlap:
+        push cx
+        push dx
+        push si
+        push di
+        mov dx, ax
+        add dx, CAR_FRONT       ; DX = our front
+        mov di, ax
+        sub di, CAR_BACK        ; DI = our back
+        mov si, park_objects
+        mov cx, PARK_OBJ_COUNT
+.next:  cmp [si + OBJ_LANE], bl
+        jne .skip               ; other lane: cannot touch
+        cmp dx, [si + OBJ_ZS]
+        jle .skip               ; our front is before the object
+        cmp di, [si + OBJ_ZE]
+        jge .skip               ; our back is past the object
+        stc                     ; overlap!
+        jmp .done
+.skip:  add si, OBJ_SIZE
+        loop .next
+        clc                     ; no overlap
+.done:  pop di
+        pop si
+        pop dx
+        pop cx
+        ret
+
+; ---------------------------------------------------------------------
+; park_crash : we touched a car or a cone.
+;   The car stops. Points are taken only once per 2 seconds, so
+;   pushing against the same car does not take 50 points every tick.
+; ---------------------------------------------------------------------
+park_crash:
+        cmp word [crash_timer], 0
+        je .new_crash
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+        ret
+.new_crash:
+        call crash              ; stop, -50 points, "CRASH" text
+        ret
+
+; ---------------------------------------------------------------------
+; draw_park_objects : draw the cars and cones, the farthest first
+;   (same "pick the farthest not drawn yet" method as draw_traffic).
+; ---------------------------------------------------------------------
+draw_park_objects:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov cx, PARK_OBJ_COUNT
+        xor di, di
+.clear: mov byte [obj_drawn + di], 0
+        inc di
+        loop .clear
+        mov dx, PARK_OBJ_COUNT  ; DX = objects still to draw
+.pick:  mov word [best_z], -32768
+        mov si, park_objects
+        xor di, di
+.scan:  cmp byte [obj_drawn + di], 1
+        je .skip
+        mov ax, [si + OBJ_ZS]
+        cmp ax, [best_z]
+        jl .skip
+        mov [best_z], ax
+        mov [best_car], si
+        mov [best_index], di
+.skip:  add si, OBJ_SIZE
+        inc di
+        cmp di, PARK_OBJ_COUNT
+        jb .scan
+        mov di, [best_index]
+        mov byte [obj_drawn + di], 1
+        mov si, [best_car]
+        mov al, [si + OBJ_X16]
+        cbw                     ; signed byte -> signed word
+        mov bx, ax              ; BX = world x
+        mov ax, [si + OBJ_ZS]
+        sub ax, [park_z]        ; AX = distance in front of us
+        cmp byte [si + OBJ_KIND], KIND_CONE
+        je .cone
+        mov cl, [si + OBJ_COLOUR]
+        call draw_car
+        jmp .drawn
+.cone:  call draw_cone
+.drawn: dec dx
+        jz .all_done
+        jmp .pick
+.all_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_cone : orange traffic cone with a white stripe.
+;   In : AX = z (distance in front of us), BX = world x
+;   Width = a quarter lane, height = 1.5 x width. The width grows evenly
+;   from 0 at the tip to full at the bottom, so we draw 3 trapezoids
+;   on top of each other: orange tip, white stripe, orange bottom.
+; ---------------------------------------------------------------------
+draw_cone:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        cmp ax, CAR_Z_MIN
+        jb .done
+        cmp ax, CAR_Z_MAX
+        ja .done
+        call project_row        ; AX = t
+        mov dx, ax
+        add dx, HORIZON         ; DX = bottom row of the cone
+        call lane_x             ; AX = centre x, CX = lane width
+        mov [cone_x], ax
+        shr cx, 3               ; half of the width = lane / 8
+        cmp cx, 2
+        jge .hw_ok
+        mov cx, 2
+.hw_ok: mov [cone_hw], cx
+        mov [cone_top], dx      ; keep the bottom row (MUL changes DX)
+        mov ax, cx
+        mul word [three]        ; height = 3 * half width
+        mov [cone_h], ax
+        sub [cone_top], ax
+        inc word [cone_top]     ; top row = bottom - height + 1
+        ; ---- the 3 parts (rows counted from the tip)
+        mov byte [color], C_CONE
+        xor si, si
+        mov di, [cone_h]
+        shr di, 1               ; tip: rows 0 .. h/2
+        call .part
+        mov byte [color], C_WHITE
+        mov si, di
+        mov ax, [cone_h]
+        shr ax, 2
+        add di, ax              ; stripe: h/4 rows
+        call .part
+        mov byte [color], C_CONE
+        mov si, di
+        mov di, [cone_h]
+        dec di                  ; bottom part down to the base
+        call .part
+.done:  pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .part : trapezoid of the cone from row SI to row DI (from the tip).
+;   half width at row r = cone_hw * r / cone_h
+.part:
+        mov ax, [cone_hw]
+        mul si
+        div word [cone_h]
+        mov bx, [cone_x]
+        sub bx, ax
+        mov [tz_xl1], bx
+        mov bx, [cone_x]
+        add bx, ax
+        mov [tz_xr1], bx
+        mov ax, [cone_hw]
+        mul di
+        div word [cone_h]
+        mov bx, [cone_x]
+        sub bx, ax
+        mov [tz_xl2], bx
+        mov bx, [cone_x]
+        add bx, ax
+        mov [tz_xr2], bx
+        mov ax, [cone_top]
+        add ax, si
+        mov [tz_y1], ax
+        mov ax, [cone_top]
+        add ax, di
+        mov [tz_y2], ax
+        call fill_trapezoid
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_parking_frame : the whole parking picture (painter's method).
 ; ---------------------------------------------------------------------
 draw_parking_frame:
         call draw_lot           ; sky, trees, lot floor, lane lines
         call draw_bay           ; green bay with the letter P
+        call draw_park_objects  ; parked cars and cones
         call draw_bonnet
         call draw_dashboard
         call draw_speed_box
@@ -2689,6 +2926,7 @@ draw_parking_frame:
         call draw_time_bar
         call draw_score_only
         call draw_banner        ; "PARKING - LEVEL 2"
+        call draw_crash_message
         ret
 
 ; ---------------------------------------------------------------------
@@ -3120,3 +3358,26 @@ lot_t           dw 0                ; draw_lot row counter
 lot_lines       dw -24, -8, 8, 24   ; world x of the white lot lines
 bay_t1          dw 0                ; draw_bay: far edge row
 bay_t2          dw 0                ; draw_bay: near edge row
+
+; ---------------- Parking lot objects ---------------------------------
+; zs, ze (along the lot), lane, kind, colour, x to draw at
+PARK_OBJ_COUNT  equ 5
+park_objects:
+        dw 5800, 5950                           ; cone left of the bay
+        db LANE_LEFT,   KIND_CONE, C_CONE, -12
+        dw 5800, 5950                           ; cone right of the bay
+        db LANE_RIGHT,  KIND_CONE, C_CONE, 12
+        dw 6300, 7350                           ; car left of the bay
+        db LANE_LEFT,   KIND_CAR, C_CAR_WHITE, -16
+        dw 6300, 7350                           ; car right of the bay
+        db LANE_RIGHT,  KIND_CAR, C_CAR_RED, 16
+        dw 8400, 9450                           ; car after the bay
+        db LANE_MIDDLE, KIND_CAR, C_CAR_RED, 0
+obj_drawn       times PARK_OBJ_COUNT db 0
+old_z           dw 0                ; park_z before the move
+old_lane        db 0                ; lane before the lane change
+cone_x          dw 0                ; draw_cone
+cone_hw         dw 0
+cone_h          dw 0
+cone_top        dw 0
+three           dw 3
