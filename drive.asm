@@ -172,6 +172,10 @@ BAY_END         equ 8000            ; ... from here to here
 TREES_TOP       equ 67              ; green band behind the lot
 PARK_SCORE      equ 1000            ; score at the start of level 2
 
+PARK_MAX_SPEED  equ 25              ; km/h top speed in the parking lot
+PARK_Z_MIN      equ 0               ; back wall of the lot
+PARK_Z_MAX      equ 12000           ; far end of the lot
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1977,9 +1981,9 @@ player_controls:
         mov byte [gear], GEAR_D ; stopped: shift to Drive
 .up_drive:
         add ax, ACCEL
-        cmp ax, MAX_SPEED * 16
+        cmp ax, [max_speed]
         jbe .no_up
-        mov ax, MAX_SPEED * 16  ; top speed reached
+        mov ax, [max_speed]     ; top speed of this level reached
 .no_up:
         ; ---- Down arrow: reverse, but ONLY when the car is stopped.
         ;      Down never works as a brake.
@@ -2272,6 +2276,7 @@ draw_crash_message:
 ; highway_start : reset everything for a fresh highway level.
 ; ---------------------------------------------------------------------
 highway_start:
+        mov word [max_speed], MAX_SPEED * 16
         mov word [time_left], TIME_MAX
         mov word [tick_count], 0
         mov word [speed_x16], 0
@@ -2609,6 +2614,7 @@ draw_menu:
 ; parking_start : set everything for a fresh parking level.
 ; ---------------------------------------------------------------------
 parking_start:
+        mov word [max_speed], PARK_MAX_SPEED * 16
         mov word [park_z], PARK_START_Z
         mov byte [player_lane], LANE_MIDDLE
         mov word [cam_x16], 0
@@ -2635,6 +2641,37 @@ parking_update:
         call go_menu            ; ESC: leave the level
         ret
 .no_esc:
+        call player_controls    ; Up, Space, Down (same as highway)
+        call player_lanes       ; Left, Right (same as highway)
+        call park_move          ; move along the lot
+        call use_fuel
+        call count_down_time
+        ret
+
+; ---------------------------------------------------------------------
+; park_move : move our car along the lot by its speed.
+;   player_velocity is + when driving forward and - when reversing,
+;   in world units per tick, so we simply add it to park_z.
+;   At the walls of the lot the car stops.
+; ---------------------------------------------------------------------
+park_move:
+        push ax
+        call player_velocity
+        add ax, [park_z]
+        cmp ax, PARK_Z_MIN
+        jge .min_ok
+        mov ax, PARK_Z_MIN      ; back wall: stop here
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+.min_ok:
+        cmp ax, PARK_Z_MAX
+        jle .max_ok
+        mov ax, PARK_Z_MAX      ; far wall: stop here
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+.max_ok:
+        mov [park_z], ax
+        pop ax
         ret
 
 ; ---------------------------------------------------------------------
@@ -3049,6 +3086,7 @@ bios_div        db 0                ; counts 0..3, BIOS runs on 4th tick
 
 ; ---------------- Player ----------------------------------------------
 speed_x16       dw 0                ; speed in 1/16 km/h
+max_speed       dw MAX_SPEED * 16   ; top speed of the current level
 player_lane     db LANE_MIDDLE      ; 0 = left, 1 = middle, 2 = right
 gear            db GEAR_D           ; 'D' = drive, 'R' = reverse
 left_latch      db 0                ; Left was held in the last tick
