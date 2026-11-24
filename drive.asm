@@ -74,7 +74,9 @@ C_BOX_BG        equ 27              ; inside of the speed box
 C_CAR_YELLOW    equ 28
 C_SENSOR_GRN    equ 29              ; sensor green
 C_PANEL         equ 30              ; message boxes / banner
-PALETTE_COUNT   equ 31              ; how many colours we define
+C_BROWN         equ 31              ; lane guide panel
+C_ARROW_DIM     equ 32              ; lane guide arrow (not our lane)
+PALETTE_COUNT   equ 33              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -212,6 +214,10 @@ SPD_R           equ 37              ; speedometer radius
 FG_X            equ 220             ; fuel gauge centre
 FG_Y            equ 188
 FG_R            equ 22              ; fuel gauge radius
+
+LG_X_HIGHWAY    equ 205             ; lane guide panel, highway
+LG_X_PARKING    equ 238             ; ... parking (right of the banner)
+LG_Y            equ 2
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -3415,6 +3421,7 @@ draw_instruments:
 .original:
         call draw_gear_box      ; D / R box, bottom left
         call draw_light_panel   ; the 9 small lights
+        call draw_lane_guide    ; arrows at the top
         call draw_speedometer   ; dial 0..200 km/h
         call draw_fuel_gauge    ; dial E..F
         call draw_wheel         ; (replaced by the big wheel later)
@@ -3810,6 +3817,85 @@ draw_fuel_gauge:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_lane_guide : element 3 of Figure 3. A small panel at the top
+;   with one up-arrow per lane. The arrow of OUR lane is highlighted
+;   (orange background, light arrow); the others are dim.
+; ---------------------------------------------------------------------
+draw_lane_guide:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov ax, LG_X_HIGHWAY
+        cmp byte [game_mode], MODE_PARKING
+        jne .x_ok
+        mov ax, LG_X_PARKING
+.x_ok:  mov [lg_x], ax
+        ; ---- orange border, brown inside
+        mov byte [color], C_ORANGE
+        mov bx, LG_Y
+        mov cx, 28
+        mov dx, 25
+        call fill_rect
+        mov byte [color], C_BROWN
+        inc ax
+        inc bx
+        mov cx, 26
+        mov dx, 23
+        call fill_rect
+        ; ---- 3 arrows, lane 0 on the left
+        xor si, si              ; SI = lane number
+.arrow: mov ax, si
+        shl ax, 3               ; 8 pixels per lane
+        add ax, [lg_x]
+        add ax, 2
+        mov [lg_col], ax        ; left x of this lane's column
+        mov byte [lg_arrow], C_ARROW_DIM
+        mov ax, si
+        cmp al, [player_lane]
+        jne .draw_arrow
+        ; our lane: orange column, light arrow
+        mov byte [color], C_ORANGE
+        mov ax, [lg_col]
+        mov bx, LG_Y + 2
+        mov cx, 8
+        mov dx, 21
+        call fill_rect
+        mov byte [lg_arrow], C_WHITE
+.draw_arrow:
+        mov al, [lg_arrow]
+        mov [color], al
+        ; arrow head: triangle, tip at the top
+        mov ax, [lg_col]
+        add ax, 4
+        mov [tz_xl1], ax
+        mov [tz_xr1], ax
+        sub ax, 3
+        mov [tz_xl2], ax
+        add ax, 6
+        mov [tz_xr2], ax
+        mov word [tz_y1], LG_Y + 4
+        mov word [tz_y2], LG_Y + 9
+        call fill_trapezoid
+        ; arrow shaft
+        mov ax, [lg_col]
+        add ax, 3
+        mov bx, LG_Y + 10
+        mov cx, 2
+        mov dx, 11
+        call fill_rect
+        inc si
+        cmp si, 3
+        jb .arrow
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_gear_box : rounded box with a ring and a big D (green) or
 ;   R (red), bottom left of the dashboard.
 ; ---------------------------------------------------------------------
@@ -4049,6 +4135,8 @@ palette:
         db 57, 47, 10           ; 28 C_CAR_YELLOW
         db 17, 50, 25           ; 29 C_SENSOR_GRN
         db  6,  6,  8           ; 30 C_PANEL
+        db 12,  8,  5           ; 31 C_BROWN
+        db 27, 24, 21           ; 32 C_ARROW_DIM
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
@@ -4197,3 +4285,6 @@ sin_table:
         dw 241, 242, 243, 245, 246, 247, 248, 249, 250, 251
         dw 252, 253, 254, 254, 255, 255, 255, 256, 256, 256
         dw 256
+lg_x            dw 0                ; draw_lane_guide
+lg_col          dw 0
+lg_arrow        db 0
