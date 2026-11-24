@@ -164,6 +164,14 @@ MODE_PARKING    equ 2               ; level 2
 SC_1            equ 02h             ; scan code of key 1
 SC_2            equ 03h             ; scan code of key 2
 
+; ---------------- Parking level ---------------------------------------
+; Positions along the parking lot are world units (262 = 1 metre).
+PARK_START_Z    equ 2000            ; where our car starts
+BAY_START       equ 6000            ; the marked bay (middle lane) ...
+BAY_END         equ 8000            ; ... from here to here
+TREES_TOP       equ 67              ; green band behind the lot
+PARK_SCORE      equ 1000            ; score at the start of level 2
+
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
 ; ---------------------------------------------------------------------
@@ -1611,8 +1619,8 @@ draw_score_only:
         push si
         mov byte [text_scale], 1
         mov byte [color], C_YELLOW
-        mov bx, HUD_TEXT_X
-        mov dx, 8
+        mov bx, 4               ; top-left corner, as in Figure 2
+        mov dx, 2
         mov si, txt_score
         call draw_string_adv
         mov ax, [score]
@@ -2464,6 +2472,11 @@ game_update:
         call highway_update
         ret
 .not_highway:
+        cmp byte [game_mode], MODE_PARKING
+        jne .not_parking
+        call parking_update
+        ret
+.not_parking:
         call menu_update
         ret
 
@@ -2476,6 +2489,11 @@ game_draw:
         call draw_highway_frame
         ret
 .not_highway:
+        cmp byte [game_mode], MODE_PARKING
+        jne .not_parking
+        call draw_parking_frame
+        ret
+.not_parking:
         call draw_menu
         ret
 
@@ -2489,7 +2507,7 @@ go_menu:
         ret
 
 ; ---------------------------------------------------------------------
-; menu_update : ESC = quit to DOS, 1 = highway level.
+; menu_update : ESC = quit to DOS, 1 = highway, 2 = parking.
 ; ---------------------------------------------------------------------
 menu_update:
         push ax
@@ -2509,6 +2527,12 @@ menu_update:
         call highway_start
         mov byte [game_mode], MODE_HIGHWAY
 .no_1:
+        ; ---- key 2: parking
+        cmp byte [key_down + SC_2], 1
+        jne .no_2
+        call parking_start
+        mov byte [game_mode], MODE_PARKING
+.no_2:
         pop ax
         ret
 
@@ -2564,6 +2588,274 @@ draw_menu:
         mov si, txt_menu_esc
         mov dx, MENU_Y + 38
         call draw_string
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
+;  parking  -  Level 2: park the car in the marked bay
+; ---------------------------------------------------------------------
+;  The parking lot uses the same 3 lanes and the same perspective as
+;  the highway. park_z is how far along the lot our car (the driver)
+;  is. Everything in the lot has a fixed place z along the lot, so on
+;  the screen it is (z - park_z) units in front of us.
+;  The bay is in the middle lane, from BAY_START to BAY_END.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; parking_start : set everything for a fresh parking level.
+; ---------------------------------------------------------------------
+parking_start:
+        mov word [park_z], PARK_START_Z
+        mov byte [player_lane], LANE_MIDDLE
+        mov word [cam_x16], 0
+        mov byte [left_latch], 1
+        mov byte [right_latch], 1
+        mov word [speed_x16], 0
+        mov word [speed_kmh], 0
+        mov byte [gear], GEAR_D
+        mov word [time_left], TIME_MAX
+        mov word [fuel], FUEL_MAX
+        mov word [fuel_acc], 0
+        mov word [score], PARK_SCORE
+        mov word [crash_timer], 0
+        mov byte [hw_state], STATE_PLAYING
+        mov word [tick_count], 0
+        ret
+
+; ---------------------------------------------------------------------
+; parking_update : one game step of the parking level.
+; ---------------------------------------------------------------------
+parking_update:
+        cmp byte [key_down + SC_ESC], 1
+        jne .no_esc
+        call go_menu            ; ESC: leave the level
+        ret
+.no_esc:
+        ret
+
+; ---------------------------------------------------------------------
+; draw_parking_frame : the whole parking picture (painter's method).
+; ---------------------------------------------------------------------
+draw_parking_frame:
+        call draw_lot           ; sky, trees, lot floor, lane lines
+        call draw_bay           ; green bay with the letter P
+        call draw_bonnet
+        call draw_dashboard
+        call draw_speed_box
+        call draw_gear
+        call draw_fuel_bar
+        call draw_wheel
+        call draw_time_bar
+        call draw_score_only
+        call draw_banner        ; "PARKING - LEVEL 2"
+        ret
+
+; ---------------------------------------------------------------------
+; draw_lot : sky, a green band of trees, the grey lot and white lines
+;   along the lanes. Each line is drawn row by row with lane_x, so it
+;   follows the perspective exactly like the highway edges.
+; ---------------------------------------------------------------------
+draw_lot:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [color], C_SKY
+        xor ax, ax
+        xor bx, bx
+        mov cx, SCREEN_W
+        mov dx, TREES_TOP
+        call fill_rect
+        mov byte [color], C_GRASS_DARK
+        mov bx, TREES_TOP
+        mov dx, HORIZON - TREES_TOP
+        call fill_rect
+        mov byte [color], C_LOT
+        mov bx, HORIZON
+        mov dx, DASH_TOP - HORIZON
+        call fill_rect
+        ; ---- white lines at world x = -24, -8, +8, +24 (lane edges)
+        mov byte [color], C_WHITE
+        mov word [lot_t], 1
+.row:   mov si, lot_lines
+        mov cx, 4
+.line:  push cx
+        mov ax, [lot_t]
+        mov bx, [si]
+        call lane_x             ; AX = x of this line on this row
+        mov bx, ax
+        mov cx, [lot_t]
+        shr cx, 5               ; lines get a bit thicker near us
+        add bx, cx
+        mov dx, [lot_t]
+        add dx, HORIZON
+        call hline
+        pop cx
+        add si, 2
+        loop .line
+        inc word [lot_t]
+        cmp word [lot_t], DASH_TOP - HORIZON
+        jb .row
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_bay : the parking bay as a green trapezoid with a white border
+;   and a big letter P in the middle.
+;   Far edge row  = PROJ_K / (BAY_END   - park_z)
+;   Near edge row = PROJ_K / (BAY_START - park_z), or the lowest row
+;                   if the near edge is already under our car.
+;   The sides are the middle lane's edges (world x -8 and +8).
+; ---------------------------------------------------------------------
+draw_bay:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov ax, BAY_END
+        sub ax, [park_z]        ; distance to the far edge
+        cmp ax, CAR_Z_MIN
+        jge .far_ok
+        jmp .done               ; we are past the bay: nothing to see
+.far_ok:
+        call project_row
+        mov [bay_t1], ax        ; row of the far edge
+        mov ax, BAY_START
+        sub ax, [park_z]        ; distance to the near edge
+        mov bx, DASH_TOP - HORIZON
+        cmp ax, CAR_Z_MIN
+        jl .near_set            ; under our car: use the lowest row
+        call project_row
+        mov bx, ax
+        cmp bx, DASH_TOP - HORIZON
+        jbe .near_set
+        mov bx, DASH_TOP - HORIZON
+.near_set:
+        mov [bay_t2], bx        ; row of the near edge
+        ; ---- white border, then the green inside
+        mov byte [color], C_WHITE
+        mov cx, 8               ; from world x -8 to +8
+        call .shape
+        inc word [bay_t1]
+        mov byte [color], C_BAY
+        mov cx, 7               ; a little narrower
+        call .shape
+        dec word [bay_t1]
+        ; ---- letter P at the middle of the bay
+        mov ax, (BAY_START + BAY_END) / 2
+        sub ax, [park_z]
+        cmp ax, CAR_Z_MIN
+        jl .done
+        call project_row
+        mov si, ax              ; SI = row of the middle
+        mov cx, ax
+        add cx, 8               ; lane width on that row
+        shr cx, 4               ; letter scale = lane width / 16
+        cmp cx, 1
+        jge .s_min
+        mov cx, 1
+.s_min: cmp cx, 4
+        jle .s_max
+        mov cx, 4
+.s_max: mov [text_scale], cl
+        shl cx, 2               ; CX = half the letter size (4 * scale)
+        push cx
+        mov ax, si
+        xor bx, bx
+        call lane_x             ; AX = centre x of the bay
+        pop cx
+        sub ax, cx
+        mov bx, ax              ; letter x
+        mov dx, si
+        add dx, HORIZON
+        sub dx, cx              ; letter y
+        mov byte [color], C_WHITE
+        mov al, 'P'
+        call draw_char
+        mov byte [text_scale], 1
+.done:  pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .shape : bay trapezoid from row bay_t1 to bay_t2, world x -CX .. +CX
+.shape:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov dx, cx              ; DX = half width (world x)
+        mov ax, [bay_t1]
+        mov bx, dx
+        neg bx
+        call lane_x
+        mov [tz_xl1], ax
+        mov ax, [bay_t1]
+        mov bx, dx
+        call lane_x
+        mov [tz_xr1], ax
+        mov ax, [bay_t2]
+        mov bx, dx
+        neg bx
+        call lane_x
+        mov [tz_xl2], ax
+        mov ax, [bay_t2]
+        mov bx, dx
+        call lane_x
+        mov [tz_xr2], ax
+        mov ax, [bay_t1]
+        add ax, HORIZON
+        mov [tz_y1], ax
+        mov ax, [bay_t2]
+        add ax, HORIZON
+        mov [tz_y2], ax
+        call fill_trapezoid
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_banner : dark rounded box at the top: "PARKING * LEVEL 2".
+; ---------------------------------------------------------------------
+BANNER_X        equ 94
+BANNER_W        equ 132
+
+draw_banner:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        mov byte [color], C_PANEL
+        mov ax, BANNER_X
+        mov bx, 2
+        mov cx, BANNER_W
+        mov dx, 15
+        call fill_rect
+        mov bx, 9
+        mov cx, 7
+        call fill_circle        ; round left end
+        mov ax, BANNER_X + BANNER_W - 1
+        call fill_circle        ; round right end
+        mov byte [color], C_WHITE
+        mov byte [text_scale], 1
+        mov si, txt_banner
+        mov dx, 6
+        call draw_string_centered
         pop si
         pop dx
         pop cx
@@ -2671,6 +2963,7 @@ txt_title       db 'DR. DRIVING LITE', 0
 txt_menu_1      db '1   HIGHWAY    (Level 1)', 0
 txt_menu_2      db '2   PARKING    (Level 2)', 0
 txt_menu_esc    db 'ESC QUIT', 0
+txt_banner      db 'PARKING ', 7, ' LEVEL 2', 0   ; 7 = round dot
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
@@ -2782,3 +3075,10 @@ bonnet_half     times DASH_TOP - BONNET_TOP dw 0   ; half width per row
 game_mode       db MODE_MENU        ; what the game is doing now
 quit_flag       db 0                ; 1 = leave the game loop
 esc_latch       db 0                ; ESC was held in the last tick
+
+; ---------------- Parking level ---------------------------------------
+park_z          dw 0                ; our position along the lot
+lot_t           dw 0                ; draw_lot row counter
+lot_lines       dw -24, -8, 8, 24   ; world x of the white lot lines
+bay_t1          dw 0                ; draw_bay: far edge row
+bay_t2          dw 0                ; draw_bay: near edge row
