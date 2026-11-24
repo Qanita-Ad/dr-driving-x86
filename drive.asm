@@ -78,7 +78,14 @@ C_BROWN         equ 31              ; lane guide panel
 C_ARROW_DIM     equ 32              ; lane guide arrow (not our lane)
 C_GREEN_DIM     equ 33              ; indicator switched off
 C_HAZARD        equ 34              ; hazard triangle (off)
-PALETTE_COUNT   equ 35              ; how many colours we define
+C_SIDEWALK      equ 35              ; light grey pavement
+C_BLD_1         equ 36              ; 4 building colours
+C_BLD_2         equ 37
+C_BLD_3         equ 38
+C_BLD_4         equ 39
+C_BLD_BASE      equ 40              ; brown shop fronts
+C_BLD_WIN       equ 41              ; windows
+PALETTE_COUNT   equ 42              ; how many colours we define
 
 ; ---------------- Perspective road ------------------------------------
 ; A world distance z (in world units) in front of the driver is drawn
@@ -231,6 +238,8 @@ W2_X            equ 280             ; original wheel centre
 W2_Y            equ 170
 W2_R_OUT        equ 46
 W2_R_IN         equ 38
+
+WALL_X16        equ 40              ; building fronts: 2.5 lanes out
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -2517,7 +2526,7 @@ end_screen_keys:
 ; draw_highway_frame : build one complete picture in the back buffer.
 ; ---------------------------------------------------------------------
 draw_highway_frame:
-        call draw_sky_ground    ; sky and grass
+        call draw_background    ; sky and grass, or the city
         call draw_road          ; element 3: road and lane lines
         call draw_traffic       ; element 4: traffic cars
         call draw_bonnet        ; element 5: orange bonnet
@@ -4102,6 +4111,259 @@ draw_wheel2:
         ret
 
 ; ---------------------------------------------------------------------
+; draw_background : sky and ground of the highway for the layout.
+; ---------------------------------------------------------------------
+draw_background:
+        cmp byte [layout], LAYOUT_ORIGINAL
+        je .city
+        call draw_sky_ground    ; simple: sky and grass
+        ret
+.city:  call draw_city          ; original: city street
+        ret
+
+; ---------------------------------------------------------------------
+; vline : vertical line.  In: AX = x, BX = y1, DX = y2 (y1 <= y2)
+;   Clipped to the screen. Writes the bytes directly, 320 apart.
+; ---------------------------------------------------------------------
+vline:
+        push ax
+        push bx
+        push cx
+        push dx
+        push di
+        cmp ax, 0
+        jl .done
+        cmp ax, SCREEN_W
+        jge .done
+        cmp bx, 0
+        jge .top_ok
+        xor bx, bx
+.top_ok:
+        cmp dx, SCREEN_H - 1
+        jle .bottom_ok
+        mov dx, SCREEN_H - 1
+.bottom_ok:
+        mov cx, dx
+        sub cx, bx
+        jl .done                ; nothing left after clipping
+        inc cx                  ; CX = number of pixels
+        mov di, bx
+        shl di, 6
+        shl bx, 8
+        add di, bx
+        add di, ax              ; DI = y1*320 + x
+        mov al, [color]
+.pixel: mov [es:di], al
+        add di, SCREEN_W        ; one row down
+        loop .pixel
+.done:  pop di
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_city : sky, pavement and two rows of buildings (Figure 3).
+;   The building fronts are two flat walls, WALL_X16 to the left and
+;   to the right of the road centre. For every row t of the road we
+;   know the distance z = PROJ_K / t, and the wall at that distance is
+;   at screen x = lane_x(t, -WALL_X16). We fill the screen columns
+;   between the wall at row t-1 and row t with vertical lines.
+;   Which building we see depends on (z + road_scroll), so the
+;   buildings slide past while we drive:
+;     building number = (z + road_scroll) / 2048, colour and height
+;     come from small tables; windows are columns where a bit of the
+;     same number is set.
+; ---------------------------------------------------------------------
+draw_city:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        mov byte [color], C_SKY
+        xor ax, ax
+        xor bx, bx
+        mov cx, SCREEN_W
+        mov dx, HORIZON
+        call fill_rect
+        mov byte [color], C_SIDEWALK
+        mov bx, HORIZON
+        mov dx, DASH_TOP - HORIZON
+        call fill_rect          ; the road is drawn on top later
+        ; ---- previous wall x positions start at the horizon
+        mov ax, 0
+        mov bx, -WALL_X16
+        call lane_x
+        mov [city_xl], ax
+        mov ax, 0
+        mov bx, WALL_X16
+        call lane_x
+        mov [city_xr], ax
+        mov word [city_t], 1
+.row:   ; ---- building at this distance
+        mov ax, [city_t]
+        call project_row        ; AX = z of this row
+        add ax, [road_scroll]
+        mov [city_p], ax        ; position along the street
+        mov bx, ax
+        mov cl, 11
+        shr bx, cl              ; building number (2048 units each)
+        and bx, 3               ; 4 different buildings, repeating
+        mov al, [bld_colour + bx]
+        mov [city_col], al
+        shl bx, 1
+        mov ax, [bld_height + bx]
+        mov [city_h], ax        ; height in 1/16 lane units
+        ; height in pixels = h * lane width / 16
+        mov ax, [city_t]
+        add ax, 8
+        mul word [city_h]
+        mov cl, 4
+        shr ax, cl
+        mov [city_hpx], ax
+        ; ---- left wall: columns from x(t) to x(t-1) - 1
+        mov ax, [city_t]
+        mov bx, -WALL_X16
+        call lane_x
+        mov si, ax              ; SI = x(t)
+        mov di, [city_xl]       ; DI = x(t-1)
+        mov [city_xl], si
+.left_col:
+        cmp si, di
+        jge .left_done
+        mov ax, si
+        call .column
+        inc si
+        jmp .left_col
+.left_done:
+        ; ---- right wall: columns from x(t-1) + 1 to x(t)
+        mov ax, [city_t]
+        mov bx, WALL_X16
+        call lane_x
+        mov di, ax              ; DI = x(t)
+        mov si, [city_xr]
+        mov [city_xr], di
+.right_col:
+        cmp si, di
+        jge .right_done
+        inc si
+        mov ax, si
+        call .column
+        jmp .right_col
+.right_done:
+        inc word [city_t]
+        cmp word [city_t], DASH_TOP - HORIZON
+        jae .done
+        jmp .row
+.done:  pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .column : one column of a building at screen x = AX.
+;   bottom = HORIZON + t, top = bottom - building height in pixels.
+;   Heights are in 1/16 lanes and become pixels with .px, so the
+;   shop front and the windows are always at the same height above
+;   the street, like real floors:
+;     shop front : 0 .. 14
+;     windows    : 22 .. 36, 48 .. 62, 74 .. 88, ... (every 26)
+.column:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        push di
+        cmp ax, 0
+        jge .x_not_left
+        jmp .col_done           ; left of the screen (far jump)
+.x_not_left:
+        cmp ax, SCREEN_W
+        jl .x_on_screen
+        jmp .col_done           ; right of the screen
+.x_on_screen:
+        mov si, ax              ; SI = x
+        mov di, [city_t]
+        add di, HORIZON         ; DI = bottom row (street level)
+        mov cx, [city_p]
+        and cx, 2047            ; CX = place inside this building
+        ; ---- the whole wall (or a dark gap between two buildings)
+        mov byte [color], C_BLD_WIN
+        cmp cx, 80
+        jb .paint_wall
+        mov al, [city_col]
+        mov [color], al
+.paint_wall:
+        mov bx, di
+        sub bx, [city_hpx]      ; BX = top row
+        mov dx, di
+        mov ax, si
+        call vline
+        cmp cx, 80
+        jb .col_done            ; gap: nothing more to draw
+        ; ---- brown shop front: height 0 .. 14
+        mov byte [color], C_BLD_BASE
+        mov ax, 14
+        call .px
+        mov bx, di
+        sub bx, ax
+        mov dx, di
+        mov ax, si
+        call vline
+        ; ---- windows, only in some columns (bit 7 of the place)
+        test cx, 128
+        jz .col_done
+        cmp cx, 1900
+        ja .col_done            ; no window right at the building end
+        mov byte [color], C_BLD_WIN
+        mov cx, 22              ; CX = height of the window bottom
+.window:
+        mov ax, cx
+        add ax, 14
+        cmp ax, [city_h]
+        ja .col_done            ; window would be above the roof
+        call .px
+        mov bx, di
+        sub bx, ax              ; BX = window top row
+        mov ax, cx
+        call .px
+        mov dx, di
+        sub dx, ax              ; DX = window bottom row
+        cmp dx, 0
+        jl .col_done            ; already above the screen
+        mov ax, si
+        call vline
+        add cx, 26              ; next floor
+        jmp .window
+.col_done:
+        pop di
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; .px : AX = height in 1/16 lanes -> AX = pixels on this row
+;       pixels = height * (8 + t) / 16
+.px:    push dx
+        push cx
+        mov cx, [city_t]
+        add cx, 8
+        mul cx
+        mov cl, 4
+        shr ax, cl
+        pop cx
+        pop dx
+        ret
+
+; ---------------------------------------------------------------------
 ; draw_gear_box : rounded box with a ring and a big D (green) or
 ;   R (red), bottom left of the dashboard.
 ; ---------------------------------------------------------------------
@@ -4345,6 +4607,13 @@ palette:
         db 27, 24, 21           ; 32 C_ARROW_DIM
         db  5, 17, 10           ; 33 C_GREEN_DIM
         db 32,  8,  8           ; 34 C_HAZARD
+        db 44, 44, 45           ; 35 C_SIDEWALK
+        db 56, 50, 41           ; 36 C_BLD_1
+        db 40, 42, 49           ; 37 C_BLD_2
+        db 51, 42, 32           ; 38 C_BLD_3
+        db 50, 51, 54           ; 39 C_BLD_4
+        db 27, 17, 14           ; 40 C_BLD_BASE
+        db 24, 29, 37           ; 41 C_BLD_WIN
 
 ; ---------------- Work variables of the drawing routines --------------
 back_seg        dw 0                ; segment of the back buffer
@@ -4498,3 +4767,12 @@ lg_col          dw 0
 lg_arrow        db 0
 ind_left        dw 0                ; ticks the left indicator flashes
 ind_right       dw 0                ; ticks the right indicator flashes
+city_t          dw 0                ; draw_city: row counter
+city_xl         dw 0                ; left wall x on the previous row
+city_xr         dw 0                ; right wall x on the previous row
+city_p          dw 0                ; place along the street
+city_col        db 0                ; colour of this building
+city_h          dw 0                ; height (1/16 lanes)
+city_hpx        dw 0                ; height in pixels on this row
+bld_colour      db C_BLD_1, C_BLD_2, C_BLD_3, C_BLD_4
+bld_height      dw 70, 100, 85, 120
