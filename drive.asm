@@ -9,11 +9,12 @@
 ;    constants, graphics (video), text, road, cars, traffic,
 ;    cockpit, HUD, keyboard (INT 9), timer (INT 8), player,
 ;    gauges (time/distance/fuel), collisions, highway level,
-;    main program, data.
+;    menu, parking level, parking sensor, main program, data.
 ;
-;  Phase 2: highway driving. Arrow keys and Space drive the car,
-;  traffic moves, collisions, fuel, time, distance and score work.
-;  ESC returns to DOS.
+;  Phase 3: complete game. A start menu (1 = Highway, 2 = Parking),
+;  level 1 = highway driving, level 2 = parking with a sensor.
+;  After a level ends (or on ESC) the game goes back to the menu.
+;  ESC in the menu returns to DOS.
 ; =====================================================================
 
         org 100h                ; .COM programs start at offset 100h
@@ -155,6 +156,13 @@ STATE_ENDED     equ 1
 MSG_WIN         equ 1               ; reached 1000 m
 MSG_TIME        equ 2               ; time ran out
 MSG_FUEL        equ 3               ; fuel ran out
+
+; ---------------- Game modes ------------------------------------------
+MODE_MENU       equ 0               ; start menu on the screen
+MODE_HIGHWAY    equ 1               ; level 1
+MODE_PARKING    equ 2               ; level 2
+SC_1            equ 02h             ; scan code of key 1
+SC_2            equ 03h             ; scan code of key 2
 
 ; =====================================================================
 ;  video.asm  -  Graphics mode, palette, back buffer and basic shapes
@@ -2281,6 +2289,11 @@ highway_start:
 ; highway_update : one game step. Called once for every timer tick.
 ; ---------------------------------------------------------------------
 highway_update:
+        cmp byte [key_down + SC_ESC], 1
+        jne .no_esc
+        call go_menu            ; ESC: leave the level
+        ret
+.no_esc:
         cmp byte [hw_state], STATE_ENDED
         jne .playing
         call end_screen_keys    ; level over: only wait for ENTER
@@ -2401,13 +2414,12 @@ draw_end_message:
         ret
 
 ; ---------------------------------------------------------------------
-; end_screen_keys : after the level ended, ENTER starts a new game.
-;   (ESC is checked in the main loop.)
+; end_screen_keys : after the level ended, ENTER goes to the menu.
 ; ---------------------------------------------------------------------
 end_screen_keys:
         cmp byte [key_down + SC_ENTER], 1
         jne .wait
-        call highway_start
+        call go_menu
 .wait:  ret
 
 ; ---------------------------------------------------------------------
@@ -2431,10 +2443,139 @@ draw_highway_frame:
 
 
 ; =====================================================================
+;  menu  -  The start menu and switching between game modes
+; ---------------------------------------------------------------------
+;  game_mode says what the game is doing right now:
+;     MODE_MENU    : the start menu is shown
+;     MODE_HIGHWAY : level 1 (highway)
+;     MODE_PARKING : level 2 (parking)
+;  The main loop always calls game_update and game_draw. These only
+;  look at game_mode and call the routine of the current mode.
+;  Keys 1 and 2 are checked only in menu_update, so they only work
+;  while the menu is on the screen.
+; =====================================================================
+
+; ---------------------------------------------------------------------
+; game_update : one game step for the current mode.
+; ---------------------------------------------------------------------
+game_update:
+        cmp byte [game_mode], MODE_HIGHWAY
+        jne .not_highway
+        call highway_update
+        ret
+.not_highway:
+        call menu_update
+        ret
+
+; ---------------------------------------------------------------------
+; game_draw : draw the picture for the current mode.
+; ---------------------------------------------------------------------
+game_draw:
+        cmp byte [game_mode], MODE_HIGHWAY
+        jne .not_highway
+        call draw_highway_frame
+        ret
+.not_highway:
+        call draw_menu
+        ret
+
+; ---------------------------------------------------------------------
+; go_menu : back to the start menu (level ended, or ESC pressed).
+; ---------------------------------------------------------------------
+go_menu:
+        mov byte [game_mode], MODE_MENU
+        mov byte [esc_latch], 1 ; ESC must be let go before it quits
+        mov word [cam_x16], 0   ; road straight behind the menu
+        ret
+
+; ---------------------------------------------------------------------
+; menu_update : ESC = quit to DOS, 1 = highway level.
+; ---------------------------------------------------------------------
+menu_update:
+        push ax
+        add word [road_scroll], 30      ; road keeps moving behind the menu
+        ; ---- ESC quits, but only on a NEW press (see go_menu)
+        mov al, [key_down + SC_ESC]
+        cmp al, 1
+        jne .esc_done
+        cmp byte [esc_latch], 1
+        je .esc_done
+        mov byte [quit_flag], 1
+.esc_done:
+        mov [esc_latch], al
+        ; ---- key 1: highway
+        cmp byte [key_down + SC_1], 1
+        jne .no_1
+        call highway_start
+        mov byte [game_mode], MODE_HIGHWAY
+.no_1:
+        pop ax
+        ret
+
+; ---------------------------------------------------------------------
+; draw_menu : moving road in the background, title and the choices.
+; ---------------------------------------------------------------------
+MENU_X          equ 40
+MENU_Y          equ 44
+MENU_W          equ 240
+MENU_H          equ 54
+
+draw_menu:
+        push ax
+        push bx
+        push cx
+        push dx
+        push si
+        call draw_sky_ground
+        call draw_road
+        call draw_bonnet
+        call draw_dashboard
+        call draw_wheel
+        ; ---- title
+        mov byte [color], C_YELLOW
+        mov byte [text_scale], 2
+        mov si, txt_title
+        mov dx, 14
+        call draw_string_centered
+        mov byte [text_scale], 1
+        ; ---- panel: light border, dark inside
+        mov byte [color], C_LIGHT_GREY
+        mov ax, MENU_X
+        mov bx, MENU_Y
+        mov cx, MENU_W
+        mov dx, MENU_H
+        call fill_rect
+        mov byte [color], C_PANEL
+        mov ax, MENU_X + 2
+        mov bx, MENU_Y + 2
+        mov cx, MENU_W - 4
+        mov dx, MENU_H - 4
+        call fill_rect
+        ; ---- choices
+        mov byte [color], C_YELLOW
+        mov bx, MENU_X + 16
+        mov si, txt_menu_1
+        mov dx, MENU_Y + 10
+        call draw_string
+        mov si, txt_menu_2
+        mov dx, MENU_Y + 24
+        call draw_string
+        mov byte [color], C_LIGHT_GREY
+        mov si, txt_menu_esc
+        mov dx, MENU_Y + 38
+        call draw_string
+        pop si
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; =====================================================================
 ;  main program
 ; ---------------------------------------------------------------------
 ;  The game loop:  update the game  ->  draw a frame  ->  show it,
-;  again and again until ESC is pressed.
+;  again and again until ESC is pressed in the menu (quit_flag).
 ; =====================================================================
 start:
         call video_init         ; mode 13h, palette, font, buffer
@@ -2442,7 +2583,7 @@ start:
         call install_timer      ; our INT 8 handler, 73 ticks/second
         call make_bonnet_table  ; bonnet shape, worked out once
         mov es, [back_seg]      ; ES = back buffer for all drawing
-        call highway_start
+        call go_menu            ; the game starts in the menu
 
 main_loop:
         ; ---- 1. one game update for every timer tick that has passed
@@ -2453,14 +2594,14 @@ main_loop:
         cmp word [tick_count], 0
         je .draw
         dec word [tick_count]
-        call highway_update
+        call game_update        ; menu, highway or parking
         jmp .catch_up
         ; ---- 2. draw the new picture and show it
 .draw:
-        call draw_highway_frame ; draw the picture in the buffer
+        call game_draw          ; draw the picture in the buffer
         call flip_screen        ; show it
-        cmp byte [key_down + SC_ESC], 1
-        jne main_loop           ; keep going until ESC is held
+        cmp byte [quit_flag], 1
+        jne main_loop           ; until ESC is pressed in the menu
 
         call remove_timer       ; normal timer again
         call remove_keyboard    ; give the keyboard back to DOS
@@ -2525,7 +2666,11 @@ txt_timeup_1    db 'TIME UP!', 0
 txt_timeup_2    db 'The time has run out.', 0
 txt_nofuel_1    db 'NO FUEL!', 0
 txt_nofuel_2    db 'The fuel tank is empty.', 0
-txt_again       db 'ENTER = again   ESC = quit', 0
+txt_again       db 'ENTER = back to menu', 0
+txt_title       db 'DR. DRIVING LITE', 0
+txt_menu_1      db '1   HIGHWAY    (Level 1)', 0
+txt_menu_2      db '2   PARKING    (Level 2)', 0
+txt_menu_esc    db 'ESC QUIT', 0
 
 ; ---------------- Colour palette: R, G, B (each 0..63) ----------------
 ; The order must match the C_... numbers in consts.asm.
@@ -2632,3 +2777,8 @@ end_msg         db 0                ; which end message to show
 
 ; ---------------- Bonnet shape ----------------------------------------
 bonnet_half     times DASH_TOP - BONNET_TOP dw 0   ; half width per row
+
+; ---------------- Game mode / menu ------------------------------------
+game_mode       db MODE_MENU        ; what the game is doing now
+quit_flag       db 0                ; 1 = leave the game loop
+esc_latch       db 0                ; ESC was held in the last tick
