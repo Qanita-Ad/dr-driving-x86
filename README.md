@@ -93,6 +93,7 @@ Everything is in one file, `drive.asm`, in labelled sections:
 ## Team and contributions
 
 | Member | Main work |
+|---|---|
 | *Qanita Adnan*  | Project setup and graphics base, cockpit, speed box and fuel bar, keyboard handler, accelerate/brake/coast, lane changes, reverse, fuel use, faster text drawing, menu and game modes, parking driving, parking sensor, auto-return and controls help |
 | *Salmana Adnan* | Road and perspective, traffic cars, time bar, distance/score, timer handler, distance and score from speed, moving traffic pattern, collisions, level end messages, bonnet table, parking lot, bay and banner, parked cars and cones, parking success test, README |
 
